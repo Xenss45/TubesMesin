@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BicaraIsyarat - Penerjemah Bahasa Isyarat</title>
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+    <!-- FontAwesome for Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <!-- Custom CSS -->
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+
+    <header class="app-header">
+        <div class="header-container">
+            <div class="logo">
+                <i class="fa-solid fa-hands-asl-interpreting"></i>
+                <h1>Bicara<span>Isyarat</span></h1>
+            </div>
+            <p class="subtitle">Sistem Terjemahan Bahasa Isyarat secara Real-Time dengan Deteksi Tangan Pintar</p>
+            <div class="system-status">
+                <span class="status-indicator online"></span>
+                <span class="status-text">Koneksi Aktif</span>
+            </div>
+        </div>
+    </header>
+
+    <main class="app-container">
+        
+        <!-- ROW 1: Webcam & Utama -->
+        <section class="workspace-section">
+            <!-- Tampilan Webcam (Kiri) -->
+            <div class="card webcam-card">
+                <div class="card-header">
+                    <h2><i class="fa-solid fa-camera"></i> Area Kamera</h2>
+                    <div class="controls-quick">
+                        <label class="switch-container">
+                            <input type="checkbox" id="mirror-mode" checked>
+                            <span class="switch-slider"></span>
+                            <span class="switch-label">Mode Cermin</span>
+                        </label>
+                    </div>
+                </div>
+                <div class="webcam-viewport">
+                    <video id="webcam" width="640" height="480" autoplay playsinline></video>
+                    <canvas id="overlay" width="640" height="480"></canvas>
+                    
+                    <!-- Loading overlay -->
+                    <div id="webcam-loader" class="viewport-loader">
+                        <div class="spinner"></div>
+                        <p>Mengakses Kamera...</p>
+                    </div>
+                </div>
+                <div class="card-footer-controls">
+                    <div class="control-group">
+                        <label for="char-select">Target Karakter:</label>
+                        <select id="char-select" class="styled-select"></select>
+                    </div>
+                    <div class="btn-actions">
+                        <button id="btn-prev-char" class="btn btn-secondary" title="Sebelumnya (Shortcut: [ )">
+                            <i class="fa-solid fa-chevron-left"></i>
+                        </button>
+                        <button id="btn-next-char" class="btn btn-secondary" title="Berikutnya (Shortcut: ] )">
+                            <i class="fa-solid fa-chevron-right"></i>
+                        </button>
+                        <button id="btn-capture" class="btn btn-primary glow-btn">
+                            <i class="fa-solid fa-camera-retro"></i> Simpan Gambar (Shortcut: S)
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Panel Penerjemahan & Teks (Kanan) -->
+            <div class="hud-panel">
+                <!-- Card Deteksi Utama -->
+                <div class="card predict-card">
+                    <div class="card-header">
+                        <h2><i class="fa-solid fa-hand"></i> Deteksi Isyarat</h2>
+                    </div>
+                    <div class="prediction-display">
+                        <div class="predicted-char-wrapper">
+                            <span id="predicted-letter">?</span>
+                        </div>
+                        <div class="confidence-container">
+                            <div class="confidence-info">
+                                <span>Kecocokan</span>
+                                <span id="confidence-percentage">0%</span>
+                            </div>
+                            <div class="progress-bar-bg">
+                                <div id="confidence-progress" class="progress-bar" style="width: 0%"></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Card Pemrosesan Citra -->
+                <div class="card debug-card">
+                    <div class="card-header">
+                        <h2><i class="fa-solid fa-image"></i> Pemrosesan Citra</h2>
+                    </div>
+                    <div class="debug-content">
+                        <div class="cnn-preview-box">
+                            <img id="cnn-input-preview" alt="Citra Terproses" src="data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACAA==" />
+                            <div class="grid-overlay"></div>
+                        </div>
+                        <div class="debug-info">
+                            <p class="debug-title">Tahapan Pemrosesan:</p>
+                            <ul>
+                                <li><span class="dot green"></span> Segmentasi warna kulit tangan</li>
+                                <li><span class="dot blue"></span> Penyesuaian ukuran bingkai</li>
+                                <li><span class="dot purple"></span> Pengurangan derau latar belakang</li>
+                            </ul>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Card Penyusun Kata & Kalimat Pintar -->
+                <div class="card sentence-builder-card">
+                    <div class="card-header">
+                        <h2><i class="fa-solid fa-font"></i> Kamus Penyusun Kalimat</h2>
+                        <span class="badge ai-source-badge" id="ai-source">Offline</span>
+                    </div>
+                    <div class="sentence-builder-content">
+                        <!-- Indikator huruf yang sedang dideteksi secara stabil -->
+                        <div class="active-detection-bar">
+                            <span class="active-label">Membaca Huruf:</span>
+                            <span class="active-value" id="active-char-display">-</span>
+                            <div class="progress-ring-container">
+                                <svg class="progress-ring" width="24" height="24">
+                                    <circle class="progress-ring__circle" stroke="var(--accent-cyan)" stroke-width="3" fill="transparent" r="9" cx="12" cy="12"/>
+                                </svg>
+                            </div>
+                        </div>
+
+                        <!-- Kata Aktif -->
+                        <div class="builder-field">
+                            <label><i class="fa-solid fa-keyboard"></i> Kata Saat Ini:</label>
+                            <div class="field-value text-glowing" id="current-word-field">-</div>
+                        </div>
+
+                        <!-- Kata Terkumpul (Raw) -->
+                        <div class="builder-field">
+                            <label><i class="fa-solid fa-list-ol"></i> Kumpulan Kata Mentah:</label>
+                            <div class="field-value" id="raw-text-field">-</div>
+                        </div>
+
+                        <!-- Kalimat Hasil Rangkaian -->
+                        <div class="builder-field result-field">
+                            <label><i class="fa-solid fa-comment-dots"></i> Hasil Rangkaian Kalimat:</label>
+                            <div class="field-value highlighted-text" id="refined-sentence-field">-</div>
+                        </div>
+
+                        <!-- Thought process panel -->
+                        <div class="thought-process-container">
+                            <div class="thought-header">
+                                <span><i class="fa-solid fa-gears"></i> Catatan Proses Penyusunan:</span>
+                            </div>
+                            <ul class="thought-list" id="thought-list">
+                                <li class="empty-thought">Menunggu kata terkumpul...</li>
+                            </ul>
+                        </div>
+
+                        <!-- Action Controls -->
+                        <div class="builder-actions">
+                            <button id="btn-space" class="btn btn-secondary" title="Spasi / Selesai Kata (Shortcut: Space)">
+                                <i class="fa-solid fa-arrows-left-right"></i> Spasi
+                            </button>
+                            <button id="btn-backspace" class="btn btn-secondary" title="Hapus Huruf (Shortcut: Backspace)">
+                                <i class="fa-solid fa-delete-left"></i> Hapus
+                            </button>
+                            <button id="btn-clear-sentence" class="btn btn-secondary" title="Reset (Shortcut: Esc)">
+                                <i class="fa-solid fa-trash-can"></i> Reset
+                            </button>
+                        </div>
+                        <div class="builder-main-actions">
+                            <button id="btn-refine" class="btn btn-primary glow-btn" title="Rangkai Kalimat (Shortcut: Enter)">
+                                <i class="fa-solid fa-language"></i> Rangkai Kalimat
+                            </button>
+                            <button id="btn-speak" class="btn btn-secondary" title="Bicara Kalimat">
+                                <i class="fa-solid fa-volume-high"></i> Suara
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Panduan Shortcut -->
+                <div class="card help-card">
+                    <div class="card-header">
+                        <h2><i class="fa-solid fa-keyboard"></i> Pintasan Papan Ketik</h2>
+                    </div>
+                    <ul class="shortcut-list">
+                        <li><kbd>S</kbd> / <kbd>s</kbd> <span>Simpan gambar ROI ke basis data</span></li>
+                        <li><kbd>[</kbd> <span>Ganti target karakter sebelumnya</span></li>
+                        <li><kbd>]</kbd> <span>Ganti target karakter berikutnya</span></li>
+                        <li><kbd>Space</kbd> <span>Akhiri kata (Spasi)</span></li>
+                        <li><kbd>Backspace</kbd> <span>Hapus huruf terakhir</span></li>
+                        <li><kbd>Enter</kbd> <span>Rangkai kalimat otomatis</span></li>
+                        <li><kbd>Esc</kbd> <span>Reset susunan kata</span></li>
+                    </ul>
+                </div>
+            </div>
+        </section>
+
+        <!-- ROW 2: Statistik Dataset -->
+        <section class="dataset-stats-section">
+            <div class="card stats-card">
+                <div class="card-header">
+                    <h2><i class="fa-solid fa-folder-open"></i> Statistik Galeri Gambar</h2>
+                    <span id="total-samples" class="badge">Total: 0 Foto</span>
+                </div>
+                <div class="stats-container">
+                    <div id="stats-grid" class="stats-grid">
+                        <!-- Akan diisi oleh JS -->
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- ROW 3: Alur Hubungan & Arsitektur (Edukasi & Dokumentasi) -->
+        <section class="architecture-section">
+            <div class="card info-card">
+                <div class="card-header">
+                    <h2><i class="fa-solid fa-circle-info"></i> Alur Kerja & Cara Kerja Sistem</h2>
+                </div>
+                <div class="info-content">
+                    <p class="description-text">
+                        Aplikasi ini menghubungkan <strong>Kamera Webcam di Web Browser (Antarmuka)</strong> dengan <strong>Model Pengenal Isyarat Tangan berbasis Python (Sistem Pemroses)</strong> secara langsung. Berikut adalah diagram alur pemrosesan data:
+                    </p>
+
+                    <!-- Diagram Arsitektur Interaktif -->
+                    <div class="architecture-flow">
+                        <div class="flow-step">
+                            <div class="flow-icon"><i class="fa-solid fa-video"></i></div>
+                            <h3>1. Penangkapan Kamera</h3>
+                            <p>Sistem mengakses webcam menggunakan standar HTML5 <code>getUserMedia()</code> dan menampilkannya di halaman web.</p>
+                        </div>
+                        <div class="flow-arrow"><i class="fa-solid fa-right-long"></i></div>
+                        
+                        <div class="flow-step">
+                            <div class="flow-icon"><i class="fa-solid fa-share-from-square"></i></div>
+                            <h3>2. Pengiriman Frame</h3>
+                            <p>Secara berkala, citra dari video disalin ke penampung digital, dikodekan ke dalam format <code>Base64</code>, dan dikirimkan via protokol HTTP.</p>
+                        </div>
+                        <div class="flow-arrow"><i class="fa-solid fa-right-long"></i></div>
+
+                        <div class="flow-step">
+                            <div class="flow-icon"><i class="fa-solid fa-scissors"></i></div>
+                            <h3>3. Pemrosesan Citra</h3>
+                            <p>Sistem memotong area ROI tangan, memisahkan warna kulit tangan dari latar belakang, dan mengubah ukuran gambar menjadi 28x28 piksel grayscale.</p>
+                        </div>
+                        <div class="flow-arrow"><i class="fa-solid fa-right-long"></i></div>
+
+                        <div class="flow-step">
+                            <div class="flow-icon"><i class="fa-solid fa-font"></i></div>
+                            <h3>4. Pencocokan Karakter</h3>
+                            <p>Model pengenal memproses gambar 28x28 untuk memprediksi kecocokan huruf (36 kelas) dan mengembalikannya ke dalam bentuk data JSON.</p>
+                        </div>
+                    </div>
+
+                    <div class="note-box">
+                        <p><strong><i class="fa-solid fa-triangle-exclamation"></i> Catatan Keandalan:</strong> Pembatasan area deteksi pada kotak ROI tetap menjamin stabilitas pembacaan tangan dan ramah penggunaan daya komputasi dibandingkan model pelacakan seluruh frame.</p>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+    </main>
+
+    <footer class="app-footer">
+        <p>© 2026 BicaraIsyarat | Tugas Besar Teknik Mesin - Sistem Kendali & Penerjemahan Bahasa Isyarat</p>
+    </footer>
+
+    <!-- Custom JS -->
+    <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+</body>
+</html>
