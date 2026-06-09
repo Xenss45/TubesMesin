@@ -1,0 +1,8 @@
+opencv-python
+numpy
+keras
+jax
+h5py
+flask
+flask-cors
+google-generativeai
