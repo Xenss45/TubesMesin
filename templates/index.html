@@ -40,8 +40,17 @@
                         <h2><i class="fa-solid fa-camera"></i> Area Kamera</h2>
                     </div>
                     <div class="webcam-viewport mirror-active">
-                        <video id="webcam" width="640" height="480" autoplay playsinline></video>
-                        <canvas id="overlay" width="640" height="480"></canvas>
+                        <div class="webcam-stage" id="webcam-stage">
+                            <video id="webcam" autoplay playsinline></video>
+                            <canvas id="overlay"></canvas>
+                            <div class="roi-input-hud">
+                                <span class="roi-input-label">Input CNN 28×28</span>
+                                <div class="cnn-preview-box roi-preview-overlay">
+                                    <img id="cnn-input-preview" alt="Citra Terproses" src="data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACAA==" />
+                                    <div class="grid-overlay"></div>
+                                </div>
+                            </div>
+                        </div>
                         <div id="webcam-loader" class="viewport-loader">
                             <div class="spinner"></div>
                             <p>Mengakses Kamera...</p>
@@ -66,39 +75,23 @@
                     </div>
                 </div>
 
-                <!-- Panel Deteksi (kompak) -->
+                <!-- Panel Deteksi -->
                 <div class="hud-panel hud-panel-compact">
-                    <div class="hud-metrics-row">
-                        <div class="card predict-card predict-card-compact">
-                            <div class="prediction-display prediction-display-compact">
-                                <div class="predicted-char-wrapper predicted-char-compact">
-                                    <span id="predicted-letter">?</span>
-                                </div>
-                                <div class="confidence-container">
-                                    <div class="confidence-info">
-                                        <span>Kecocokan</span>
-                                        <span id="confidence-percentage">0%</span>
-                                    </div>
-                                    <div class="progress-bar-bg">
-                                        <div id="confidence-progress" class="progress-bar" style="width: 0%"></div>
-                                    </div>
-                                </div>
-                            </div>
+                    <div class="card predict-card predict-card-compact">
+                        <div class="card-header card-header-compact">
+                            <h2><i class="fa-solid fa-hand"></i> Deteksi Isyarat</h2>
                         </div>
-
-                        <div class="card debug-card debug-card-compact">
-                            <div class="debug-content debug-content-compact">
-                                <div class="cnn-preview-box cnn-preview-sm">
-                                    <img id="cnn-input-preview" alt="Citra Terproses" src="data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACAA==" />
-                                    <div class="grid-overlay"></div>
+                        <div class="prediction-display prediction-display-compact">
+                            <div class="predicted-char-wrapper predicted-char-compact">
+                                <span id="predicted-letter">?</span>
+                            </div>
+                            <div class="confidence-container">
+                                <div class="confidence-info">
+                                    <span>Kecocokan</span>
+                                    <span id="confidence-percentage">0%</span>
                                 </div>
-                                <div class="debug-info debug-info-compact">
-                                    <p class="debug-title">ROI 28×28</p>
-                                    <ul>
-                                        <li><span class="dot green"></span> Segmentasi kulit</li>
-                                        <li><span class="dot blue"></span> Resize bingkai</li>
-                                        <li><span class="dot purple"></span> Reduksi derau</li>
-                                    </ul>
+                                <div class="progress-bar-bg">
+                                    <div id="confidence-progress" class="progress-bar" style="width: 0%"></div>
                                 </div>
                             </div>
                         </div>

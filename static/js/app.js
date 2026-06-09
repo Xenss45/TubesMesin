@@ -65,9 +65,9 @@ const composerPreview = document.getElementById('composer-preview');
 
 // Canvas tersembunyi untuk grab frame gambar mentah
 const grabCanvas = document.createElement('canvas');
-grabCanvas.width = 640;
-grabCanvas.height = 480;
 const grabCtx = grabCanvas.getContext('2d');
+let videoFrameWidth = 640;
+let videoFrameHeight = 480;
 
 // --- 1. INISIALISASI ---
 
@@ -83,14 +83,44 @@ function populateDropdown() {
     selectChar.value = alphabet[activeLetterIdx];
 }
 
+function getRoiCoords(w, h, boxSize = 240) {
+    const x_min = Math.max(0, Math.floor(w * 0.55 - boxSize * 0.5));
+    const y_min = Math.max(0, Math.floor(h * 0.5 - boxSize * 0.5));
+    const x_max = Math.min(w, x_min + boxSize);
+    const y_max = Math.min(h, y_min + boxSize);
+    return {
+        x_min,
+        y_min,
+        box_size: Math.min(boxSize, x_max - x_min, y_max - y_min)
+    };
+}
+
+function syncWebcamLayout() {
+    const vw = video.videoWidth;
+    const vh = video.videoHeight;
+    if (!vw || !vh) return;
+
+    videoFrameWidth = vw;
+    videoFrameHeight = vh;
+    overlay.width = vw;
+    overlay.height = vh;
+    grabCanvas.width = vw;
+    grabCanvas.height = vh;
+
+    const stage = document.getElementById('webcam-stage');
+    if (stage) {
+        stage.style.aspectRatio = `${vw} / ${vh}`;
+    }
+}
+
 // Buka webcam
 async function setupWebcam() {
     try {
         loader.style.display = 'flex';
         const stream = await navigator.mediaDevices.getUserMedia({
             video: {
-                width: 640,
-                height: 480,
+                width: { ideal: 640 },
+                height: { ideal: 480 },
                 facingMode: 'user'
             },
             audio: false
@@ -99,6 +129,7 @@ async function setupWebcam() {
         
         return new Promise((resolve) => {
             video.onloadedmetadata = () => {
+                syncWebcamLayout();
                 loader.style.display = 'none';
                 resolve();
             };
@@ -217,10 +248,15 @@ function processStableLetter(result) {
     hasTypedCurrentSign = false;
 }
 
-// Grab frame dan ubah ke format base64
+// Grab frame dan ubah ke format base64 (resolusi asli kamera, tanpa distorsi)
 function getFrameBase64() {
-    // Kita capture video frame apa adanya
-    grabCtx.drawImage(video, 0, 0, 640, 480);
+    const w = video.videoWidth || videoFrameWidth;
+    const h = video.videoHeight || videoFrameHeight;
+    if (grabCanvas.width !== w || grabCanvas.height !== h) {
+        grabCanvas.width = w;
+        grabCanvas.height = h;
+    }
+    grabCtx.drawImage(video, 0, 0, w, h);
     return grabCanvas.toDataURL('image/jpeg', 0.85);
 }
 
@@ -350,15 +386,15 @@ async function captureAndSaveDataset() {
 
 // Render loop HUD overlay (kotak ROI tetap dan hasil prediksi)
 function renderHUDLoop() {
-    ctx.clearRect(0, 0, 640, 480);
-    
-    // Tentukan kotak ROI tetap default (240x240)
-    // Sesuai dengan rumus Python:
-    // x_min = int(w * 0.55) - 120 = 352 - 120 = 232
-    // y_min = int(h * 0.5) - 120 = 240 - 120 = 120
-    const x_min = 232;
-    const y_min = 120;
-    const box_size = 240;
+    const fw = overlay.width || videoFrameWidth;
+    const fh = overlay.height || videoFrameHeight;
+    if (overlay.width !== fw || overlay.height !== fh) {
+        overlay.width = fw;
+        overlay.height = fh;
+    }
+    ctx.clearRect(0, 0, fw, fh);
+
+    const { x_min, y_min, box_size } = getRoiCoords(fw, fh);
     
     let boxColor = "#3b82f6"; // Biru default
     let predText = "";
@@ -857,7 +893,8 @@ async function startApp() {
     
     try {
         await setupWebcam();
-        
+        window.addEventListener('resize', syncWebcamLayout);
+
         setInterval(runPrediction, PREDICTION_INTERVAL_MS);
         setInterval(updateSentenceBuilderUI, 50);
         requestAnimationFrame(renderHUDLoop);

@@ -206,18 +206,27 @@ body {
 
 .webcam-viewport {
     position: relative;
-    width: calc(100% - 24px);
-    max-width: 520px;
+    width: 100%;
+    min-height: 220px;
+    padding: 10px 16px 12px;
+    background: #05070c;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+}
+
+.webcam-stage {
+    position: relative;
+    width: 100%;
+    max-width: 640px;
+    max-height: min(48vh, 420px);
     aspect-ratio: 4 / 3;
-    max-height: min(36vh, 320px);
-    height: auto;
-    background: #000;
-    align-self: center;
-    margin: 10px auto;
+    line-height: 0;
     border-radius: var(--radius-md);
     overflow: hidden;
     border: 2px solid rgba(255, 255, 255, 0.05);
     box-shadow: 0 0 20px rgba(0, 0, 0, 0.5);
+    background: #000;
 }
 
 .card-header-compact {
@@ -255,12 +264,10 @@ body {
 }
 
 #webcam {
-    position: absolute;
-    top: 0;
-    left: 0;
+    display: block;
     width: 100%;
     height: 100%;
-    object-fit: fill; /* Menggunakan fill agar visual di browser pas dengan koordinat crop Python */
+    object-fit: contain;
 }
 
 #overlay {
@@ -270,7 +277,7 @@ body {
     width: 100%;
     height: 100%;
     z-index: 10;
-    pointer-events: none; /* Klik bisa menembus canvas overlay */
+    pointer-events: none;
 }
 
 /* Webcam mirror selalu aktif (tangan kanan + konsisten dengan preprocessing) */
@@ -279,13 +286,46 @@ body {
     transform: scaleX(-1);
 }
 
+.roi-input-hud {
+    position: absolute;
+    bottom: 10px;
+    right: 10px;
+    z-index: 15;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 4px;
+    pointer-events: none;
+}
+
+.roi-input-label {
+    font-size: 10px;
+    font-weight: 600;
+    color: rgba(255, 255, 255, 0.85);
+    background: rgba(0, 0, 0, 0.65);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    padding: 2px 8px;
+    border-radius: 4px;
+    letter-spacing: 0.3px;
+    font-family: var(--font-mono);
+}
+
+.roi-preview-overlay {
+    width: 72px;
+    height: 72px;
+    border: 2px solid rgba(99, 102, 241, 0.5);
+    background: #05070c;
+    border-radius: var(--radius-sm);
+    overflow: hidden;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
+}
+
 /* Loader Webcam */
 .viewport-loader {
     position: absolute;
-    top: 0;
-    left: 0;
-    width: 100%;
-    height: 100%;
+    inset: 10px 16px 12px;
+    width: auto;
+    height: auto;
     background: #090D16;
     display: flex;
     flex-direction: column;
@@ -451,17 +491,6 @@ body {
     gap: 10px;
 }
 
-.hud-metrics-row {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 10px;
-}
-
-@media (max-width: 520px) {
-    .hud-metrics-row {
-        grid-template-columns: 1fr;
-    }
-}
 
 .predict-card .prediction-display {
     padding: 30px 20px;
