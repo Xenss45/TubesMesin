@@ -173,13 +173,17 @@ def predict():
         
         h, w = frame.shape[:2]
         x_min, y_min, x_max, y_max = get_fixed_roi_coords(w, h)
+        print(f"[DEBUG] frame shape: {w}x{h}, ROI coords: {x_min},{y_min} to {x_max},{y_max}", flush=True)
         
-        # Potong ROI lalu flip horizontal (selalu mirror untuk tangan kanan + tampilan cermin)
+        # Potong ROI dari frame asli (non-mirrored)
         roi = frame[y_min:y_max, x_min:x_max]
-        roi = cv2.flip(roi, 1)
         
         if roi.size > 0:
+            # Save raw crop for debugging
+            cv2.imwrite("debug_roi_raw.jpg", roi)
             input_image, segmented_roi = preprocess_for_prediction(roi)
+            cv2.imwrite("debug_roi_segmented.jpg", segmented_roi)
+            print(f"[DEBUG] ROI mean: {np.mean(roi):.2f}, segmented ROI mean: {np.mean(segmented_roi):.2f}", flush=True)
             if input_image is not None and model is not None:
                 hand_detected, gray_seg = is_hand_in_roi(segmented_roi)
                 if not hand_detected:
@@ -223,9 +227,8 @@ def save_dataset():
         h, w = frame.shape[:2]
         x_min, y_min, x_max, y_max = get_fixed_roi_coords(w, h)
         
-        # Potong ROI lalu flip horizontal (selalu mirror untuk tangan kanan + tampilan cermin)
+        # Potong ROI dari frame asli (non-mirrored)
         roi = frame[y_min:y_max, x_min:x_max]
-        roi = cv2.flip(roi, 1)
         
         if roi.size > 0:
             # Terapkan segmentasi warna kulit dan simpan dalam ukuran 200x200

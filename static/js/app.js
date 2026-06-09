@@ -467,7 +467,13 @@ function renderHUDLoop() {
         ctx.fillRect(x_min, y_min - 30, textWidth + 16, 24);
         
         ctx.fillStyle = boxColor;
-        ctx.fillText(predText, x_min + 8, y_min - 13);
+        ctx.save();
+        // Karena canvas overlay di-mirror via CSS transform: scaleX(-1),
+        // kita perlu membalik sumbu X sebelum menggambar teks agar teks tidak terbalik.
+        ctx.translate(x_min + textWidth + 8, 0);
+        ctx.scale(-1, 1);
+        ctx.fillText(predText, 0, y_min - 13);
+        ctx.restore();
     }
     
     requestAnimationFrame(renderHUDLoop);
