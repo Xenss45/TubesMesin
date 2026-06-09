@@ -31,183 +31,179 @@
 
     <main class="app-container">
         
-        <!-- ROW 1: Webcam & Utama -->
+        <!-- ROW 1: Kamera + HUD (atas) & Penyusun Kalimat (dock selalu terlihat) -->
         <section class="workspace-section">
-            <!-- Tampilan Webcam (Kiri) -->
-            <div class="card webcam-card">
-                <div class="card-header">
-                    <h2><i class="fa-solid fa-camera"></i> Area Kamera</h2>
-                </div>
-                <div class="webcam-viewport mirror-active">
-                    <video id="webcam" width="640" height="480" autoplay playsinline></video>
-                    <canvas id="overlay" width="640" height="480"></canvas>
-                    
-                    <!-- Loading overlay -->
-                    <div id="webcam-loader" class="viewport-loader">
-                        <div class="spinner"></div>
-                        <p>Mengakses Kamera...</p>
+            <div class="workspace-top">
+                <!-- Tampilan Webcam -->
+                <div class="card webcam-card">
+                    <div class="card-header card-header-compact">
+                        <h2><i class="fa-solid fa-camera"></i> Area Kamera</h2>
+                    </div>
+                    <div class="webcam-viewport mirror-active">
+                        <video id="webcam" width="640" height="480" autoplay playsinline></video>
+                        <canvas id="overlay" width="640" height="480"></canvas>
+                        <div id="webcam-loader" class="viewport-loader">
+                            <div class="spinner"></div>
+                            <p>Mengakses Kamera...</p>
+                        </div>
+                    </div>
+                    <div class="card-footer-controls card-footer-compact">
+                        <div class="control-group">
+                            <label for="char-select">Target:</label>
+                            <select id="char-select" class="styled-select styled-select-sm"></select>
+                        </div>
+                        <div class="btn-actions">
+                            <button id="btn-prev-char" class="btn btn-secondary btn-icon" title="Sebelumnya ( [ )">
+                                <i class="fa-solid fa-chevron-left"></i>
+                            </button>
+                            <button id="btn-next-char" class="btn btn-secondary btn-icon" title="Berikutnya ( ] )">
+                                <i class="fa-solid fa-chevron-right"></i>
+                            </button>
+                            <button id="btn-capture" class="btn btn-primary glow-btn btn-sm">
+                                <i class="fa-solid fa-camera-retro"></i> Simpan <kbd>S</kbd>
+                            </button>
+                        </div>
                     </div>
                 </div>
-                <div class="card-footer-controls">
-                    <div class="control-group">
-                        <label for="char-select">Target Karakter:</label>
-                        <select id="char-select" class="styled-select"></select>
+
+                <!-- Panel Deteksi (kompak) -->
+                <div class="hud-panel hud-panel-compact">
+                    <div class="hud-metrics-row">
+                        <div class="card predict-card predict-card-compact">
+                            <div class="prediction-display prediction-display-compact">
+                                <div class="predicted-char-wrapper predicted-char-compact">
+                                    <span id="predicted-letter">?</span>
+                                </div>
+                                <div class="confidence-container">
+                                    <div class="confidence-info">
+                                        <span>Kecocokan</span>
+                                        <span id="confidence-percentage">0%</span>
+                                    </div>
+                                    <div class="progress-bar-bg">
+                                        <div id="confidence-progress" class="progress-bar" style="width: 0%"></div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="card debug-card debug-card-compact">
+                            <div class="debug-content debug-content-compact">
+                                <div class="cnn-preview-box cnn-preview-sm">
+                                    <img id="cnn-input-preview" alt="Citra Terproses" src="data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACAA==" />
+                                    <div class="grid-overlay"></div>
+                                </div>
+                                <div class="debug-info debug-info-compact">
+                                    <p class="debug-title">ROI 28×28</p>
+                                    <ul>
+                                        <li><span class="dot green"></span> Segmentasi kulit</li>
+                                        <li><span class="dot blue"></span> Resize bingkai</li>
+                                        <li><span class="dot purple"></span> Reduksi derau</li>
+                                    </ul>
+                                </div>
+                            </div>
+                        </div>
                     </div>
-                    <div class="btn-actions">
-                        <button id="btn-prev-char" class="btn btn-secondary" title="Sebelumnya (Shortcut: [ )">
-                            <i class="fa-solid fa-chevron-left"></i>
-                        </button>
-                        <button id="btn-next-char" class="btn btn-secondary" title="Berikutnya (Shortcut: ] )">
-                            <i class="fa-solid fa-chevron-right"></i>
-                        </button>
-                        <button id="btn-capture" class="btn btn-primary glow-btn">
-                            <i class="fa-solid fa-camera-retro"></i> Simpan Gambar (Shortcut: S)
-                        </button>
-                    </div>
+
+                    <details class="card help-card help-card-collapsible">
+                        <summary class="card-header card-header-compact">
+                            <h2><i class="fa-solid fa-keyboard"></i> Pintasan</h2>
+                            <span class="help-expand-hint">klik untuk buka</span>
+                        </summary>
+                        <ul class="shortcut-list shortcut-list-compact">
+                            <li><kbd>S</kbd> <span>Simpan ROI</span></li>
+                            <li><kbd>[</kbd> <kbd>]</kbd> <span>Ganti karakter</span></li>
+                            <li><kbd>Space</kbd> <span>Spasi / akhiri kata</span></li>
+                            <li><kbd>1</kbd><kbd>2</kbd><kbd>3</kbd> <span>Prediksi kata</span></li>
+                            <li><kbd>Backspace</kbd> <span>Hapus huruf</span></li>
+                            <li><kbd>Enter</kbd> <span>Rangkai kalimat</span></li>
+                            <li><kbd>Esc</kbd> <span>Reset</span></li>
+                        </ul>
+                    </details>
                 </div>
             </div>
 
-            <!-- Panel Penerjemahan & Teks (Kanan) -->
-            <div class="hud-panel">
-                <!-- Card Deteksi Utama -->
-                <div class="card predict-card">
-                    <div class="card-header">
-                        <h2><i class="fa-solid fa-hand"></i> Deteksi Isyarat</h2>
+            <!-- Dock Penyusun Kalimat — selalu terlihat, fokus utama -->
+            <div class="composer-dock card sentence-builder-card">
+                <div class="composer-dock-header">
+                    <div class="composer-dock-title">
+                        <i class="fa-solid fa-comments"></i>
+                        <h2>Terjemahan Kalimat</h2>
                     </div>
-                    <div class="prediction-display">
-                        <div class="predicted-char-wrapper">
-                            <span id="predicted-letter">?</span>
-                        </div>
-                        <div class="confidence-container">
-                            <div class="confidence-info">
-                                <span>Kecocokan</span>
-                                <span id="confidence-percentage">0%</span>
-                            </div>
-                            <div class="progress-bar-bg">
-                                <div id="confidence-progress" class="progress-bar" style="width: 0%"></div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- Card Pemrosesan Citra -->
-                <div class="card debug-card">
-                    <div class="card-header">
-                        <h2><i class="fa-solid fa-image"></i> Pemrosesan Citra</h2>
-                    </div>
-                    <div class="debug-content">
-                        <div class="cnn-preview-box">
-                            <img id="cnn-input-preview" alt="Citra Terproses" src="data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACAA==" />
-                            <div class="grid-overlay"></div>
-                        </div>
-                        <div class="debug-info">
-                            <p class="debug-title">Tahapan Pemrosesan:</p>
-                            <ul>
-                                <li><span class="dot green"></span> Segmentasi warna kulit tangan</li>
-                                <li><span class="dot blue"></span> Penyesuaian ukuran bingkai</li>
-                                <li><span class="dot purple"></span> Pengurangan derau latar belakang</li>
-                            </ul>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- Card Penyusun Kata & Kalimat Pintar -->
-                <div class="card sentence-builder-card">
-                    <div class="card-header">
-                        <h2><i class="fa-solid fa-font"></i> Kamus Penyusun Kalimat</h2>
-                        <span class="badge ai-source-badge" id="ai-source">Offline</span>
-                    </div>
-                    <div class="sentence-builder-content">
-                        <!-- Indikator huruf yang sedang dideteksi secara stabil -->
-                        <div class="active-detection-bar">
-                            <span class="active-label">Membaca Huruf:</span>
+                    <div class="composer-dock-meta">
+                        <div class="active-detection-inline">
+                            <span class="active-label">Huruf</span>
                             <span class="active-value" id="active-char-display">-</span>
-                            <div class="hold-progress-container">
-                                <div class="hold-progress-bg">
-                                    <div id="hold-progress-bar" class="hold-progress-fill"></div>
-                                </div>
-                                <span class="hold-progress-label" id="hold-progress-label">Tahan isyarat ~1,5 dtk</span>
+                            <div class="hold-progress-bg hold-progress-inline">
+                                <div id="hold-progress-bar" class="hold-progress-fill"></div>
                             </div>
+                            <span class="hold-progress-label" id="hold-progress-label">Tahan ~1,5 dtk</span>
                             <div class="progress-ring-container">
-                                <svg class="progress-ring" width="24" height="24">
-                                    <circle class="progress-ring__circle" stroke="var(--accent-cyan)" stroke-width="3" fill="transparent" r="9" cx="12" cy="12"/>
+                                <svg class="progress-ring" width="20" height="20">
+                                    <circle class="progress-ring__circle" stroke="var(--accent-cyan)" stroke-width="3" fill="transparent" r="7" cx="10" cy="10"/>
                                 </svg>
                             </div>
                         </div>
-
-                        <!-- Kata Aktif -->
-                        <div class="builder-field">
-                            <label><i class="fa-solid fa-keyboard"></i> Kata Saat Ini:</label>
-                            <div class="field-value text-glowing" id="current-word-field">-</div>
-                        </div>
-
-                        <!-- Kata Terkumpul (Raw) -->
-                        <div class="builder-field">
-                            <label><i class="fa-solid fa-list-ol"></i> Kumpulan Kata Mentah:</label>
-                            <div class="field-value" id="raw-text-field">-</div>
-                        </div>
-
-                        <!-- Kalimat Hasil Rangkaian -->
-                        <div class="builder-field result-field">
-                            <label><i class="fa-solid fa-comment-dots"></i> Hasil Rangkaian Kalimat:</label>
-                            <div class="field-value highlighted-text" id="refined-sentence-field">-</div>
-                        </div>
-
-                        <!-- Thought process panel -->
-                        <div class="thought-process-container">
-                            <div class="thought-header">
-                                <span><i class="fa-solid fa-gears"></i> Catatan Proses Penyusunan:</span>
-                            </div>
-                            <ul class="thought-list" id="thought-list">
-                                <li class="empty-thought">Menunggu kata terkumpul...</li>
-                            </ul>
-                        </div>
-
-                        <!-- Action Controls -->
-                        <div class="builder-actions">
-                            <button id="btn-space" class="btn btn-secondary" title="Spasi / Selesai Kata (Shortcut: Space)">
-                                <i class="fa-solid fa-arrows-left-right"></i> Spasi
-                            </button>
-                            <button id="btn-backspace" class="btn btn-secondary" title="Hapus Huruf (Shortcut: Backspace)">
-                                <i class="fa-solid fa-delete-left"></i> Hapus
-                            </button>
-                            <button id="btn-clear-sentence" class="btn btn-secondary" title="Reset (Shortcut: Esc)">
-                                <i class="fa-solid fa-trash-can"></i> Reset
-                            </button>
-                        </div>
-                        <div class="language-select-group">
-                            <label for="language-select"><i class="fa-solid fa-globe"></i> Bahasa Output:</label>
-                            <select id="language-select" class="styled-select">
-                                <option value="auto" selected>Auto (Deteksi Otomatis)</option>
-                                <option value="id">Bahasa Indonesia</option>
-                                <option value="en">English</option>
-                            </select>
-                        </div>
-                        <div class="builder-main-actions">
-                            <button id="btn-refine" class="btn btn-primary glow-btn" title="Rangkai Kalimat (Shortcut: Enter)">
-                                <i class="fa-solid fa-language"></i> Rangkai Kalimat
-                            </button>
-                            <button id="btn-speak" class="btn btn-secondary" title="Bicara Kalimat">
-                                <i class="fa-solid fa-volume-high"></i> Suara
-                            </button>
-                        </div>
+                        <span class="badge ai-source-badge" id="ai-source" data-default-status="{{ ai_source_status }}">{{ ai_source_status }}</span>
                     </div>
                 </div>
 
-                <!-- Panduan Shortcut -->
-                <div class="card help-card">
-                    <div class="card-header">
-                        <h2><i class="fa-solid fa-keyboard"></i> Pintasan Papan Ketik</h2>
+                <div class="sentence-builder-content sentence-builder-compact composer-dock-body">
+                    <div class="composer-hero">
+                        <div class="composer-preview composer-preview-hero">
+                            <div class="composer-preview-text" id="composer-preview">
+                                <span class="composer-committed" id="raw-text-field">-</span>
+                                <span class="composer-current" id="current-word-field"></span>
+                                <span class="composer-cursor" aria-hidden="true"></span>
+                            </div>
+                        </div>
+                        <div class="composer-result composer-result-inline">
+                            <span class="composer-result-label"><i class="fa-solid fa-sparkles"></i></span>
+                            <span class="composer-result-text highlighted-text" id="refined-sentence-field">-</span>
+                        </div>
                     </div>
-                    <ul class="shortcut-list">
-                        <li><kbd>S</kbd> / <kbd>s</kbd> <span>Simpan gambar ROI ke basis data</span></li>
-                        <li><kbd>[</kbd> <span>Ganti target karakter sebelumnya</span></li>
-                        <li><kbd>]</kbd> <span>Ganti target karakter berikutnya</span></li>
-                        <li><kbd>Space</kbd> <span>Akhiri kata (Spasi)</span></li>
-                        <li><kbd>Backspace</kbd> <span>Hapus huruf terakhir</span></li>
-                        <li><kbd>Enter</kbd> <span>Rangkai kalimat otomatis</span></li>
-                        <li><kbd>Esc</kbd> <span>Reset susunan kata</span></li>
-                    </ul>
+
+                    <div class="word-suggestions-panel word-suggestions-hero">
+                        <div class="word-suggestions-header">
+                            <span><i class="fa-solid fa-wand-magic-sparkles"></i> Prediksi Kata</span>
+                            <span class="word-suggestions-hint"><kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd></span>
+                        </div>
+                        <div class="word-suggestions" id="word-suggestions">
+                            <button type="button" class="word-suggestion empty" disabled>Mengetik isyarat...</button>
+                        </div>
+                    </div>
+
+                    <div class="composer-dock-footer">
+                        <div class="composer-toolbar">
+                            <div class="composer-toolbar-group">
+                                <button id="btn-space" class="btn btn-secondary btn-compact" title="Spasi (Space)">
+                                    <i class="fa-solid fa-arrows-left-right"></i> Spasi
+                                </button>
+                                <button id="btn-backspace" class="btn btn-secondary btn-compact" title="Hapus (Backspace)">
+                                    <i class="fa-solid fa-delete-left"></i>
+                                </button>
+                                <button id="btn-clear-sentence" class="btn btn-secondary btn-compact" title="Reset (Esc)">
+                                    <i class="fa-solid fa-trash-can"></i>
+                                </button>
+                            </div>
+                            <select id="language-select" class="styled-select language-select-compact" title="Bahasa Output">
+                                <option value="auto" selected>Auto</option>
+                                <option value="id">ID</option>
+                                <option value="en">EN</option>
+                            </select>
+                            <button id="btn-refine" class="btn btn-primary glow-btn btn-compact" title="Rangkai Kalimat (Enter)">
+                                <i class="fa-solid fa-language"></i> Rangkai
+                            </button>
+                            <button id="btn-speak" class="btn btn-secondary btn-compact" title="Suara">
+                                <i class="fa-solid fa-volume-high"></i>
+                            </button>
+                        </div>
+                        <details class="thought-details thought-details-mini">
+                            <summary><i class="fa-solid fa-gears"></i> Proses</summary>
+                            <ul class="thought-list" id="thought-list">
+                                <li class="empty-thought">Menunggu kata terkumpul...</li>
+                            </ul>
+                        </details>
+                    </div>
                 </div>
             </div>
         </section>

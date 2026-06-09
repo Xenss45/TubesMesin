@@ -17,6 +17,14 @@ let isRefining = false;
 let hasTypedCurrentSign = false;
 let lastDetectedLanguage = "id";
 
+// WORD PREDICTION STATE
+let wordSuggestions = [];
+let isFetchingSuggestions = false;
+let wordSuggestionDebounce = null;
+let lastSuggestionRequest = "";
+let lastScheduledPartial = "";
+const WORD_SUGGESTION_DEBOUNCE_MS = 450;
+
 // DOM ELEMENTS
 const video = document.getElementById('webcam');
 const overlay = document.getElementById('overlay');
@@ -40,6 +48,7 @@ const rawTextField = document.getElementById('raw-text-field');
 const refinedSentenceField = document.getElementById('refined-sentence-field');
 const thoughtList = document.getElementById('thought-list');
 const aiSource = document.getElementById('ai-source');
+const defaultAiSourceStatus = aiSource?.dataset.defaultStatus || "Sistem Lokal";
 const progressCircle = document.querySelector('.progress-ring__circle');
 
 // Sentence Builder Buttons
@@ -51,6 +60,8 @@ const btnSpeak = document.getElementById('btn-speak');
 const languageSelect = document.getElementById('language-select');
 const holdProgressBar = document.getElementById('hold-progress-bar');
 const holdProgressLabel = document.getElementById('hold-progress-label');
+const wordSuggestionsEl = document.getElementById('word-suggestions');
+const composerPreview = document.getElementById('composer-preview');
 
 // Canvas tersembunyi untuk grab frame gambar mentah
 const grabCanvas = document.createElement('canvas');
@@ -179,12 +190,9 @@ function getHoldProgressPercent() {
 }
 
 function triggerWordPulse() {
+    if (!currentWordField) return;
     currentWordField.classList.add('pulse-effect');
-    currentWordField.style.textShadow = '0 0 15px var(--accent-cyan)';
-    setTimeout(() => {
-        currentWordField.classList.remove('pulse-effect');
-        currentWordField.style.textShadow = '0 0 8px rgba(255, 255, 255, 0.2)';
-    }, 300);
+    setTimeout(() => currentWordField.classList.remove('pulse-effect'), 300);
 }
 
 function processStableLetter(result) {
@@ -486,12 +494,15 @@ document.addEventListener('keydown', (e) => {
     } else if (e.key === 'Escape') {
         e.preventDefault();
         handleClearAction();
+    } else if (e.key >= '1' && e.key <= '3') {
+        e.preventDefault();
+        selectWordSuggestion(parseInt(e.key, 10) - 1);
     }
 });
 
 // --- SENTENCE BUILDER CORE LOGIC & ACTIONS ---
 
-const circleCircumference = 56.54;
+const circleCircumference = 43.98;
 if (progressCircle) {
     progressCircle.style.strokeDasharray = `${circleCircumference} ${circleCircumference}`;
     progressCircle.style.strokeDashoffset = circleCircumference;
@@ -507,15 +518,26 @@ function updateSentenceBuilderUI() {
     if (activeCharDisplay) {
         activeCharDisplay.textContent = stableLetter ? stableLetter.toUpperCase() : "-";
     }
-    if (currentWordField) {
-        currentWordField.textContent = currentWord ? currentWord.toUpperCase() : "-";
-    }
-    
+
+    const rawSentence = accumulatedWords.join(" ");
     if (rawTextField) {
-        const rawSentence = accumulatedWords.join(" ");
-        rawTextField.textContent = rawSentence ? rawSentence : "-";
+        rawTextField.textContent = rawSentence || (!currentWord ? "-" : "");
     }
-    
+    if (currentWordField) {
+        if (currentWord) {
+            currentWordField.textContent = currentWord;
+            currentWordField.style.display = "";
+        } else {
+            currentWordField.textContent = "";
+            currentWordField.style.display = "none";
+        }
+    }
+    if (composerPreview) {
+        composerPreview.classList.toggle("composer-empty", !rawSentence && !currentWord);
+    }
+
+    scheduleWordSuggestionsFetch();
+
     const holdPct = getHoldProgressPercent();
     setProgress(holdPct);
 
@@ -525,18 +547,167 @@ function updateSentenceBuilderUI() {
     if (holdProgressLabel) {
         if (stableLetter && !hasTypedCurrentSign) {
             const remaining = Math.max(0, (HOLD_DURATION_MS - (Date.now() - (stableLetterSince || Date.now()))) / 1000);
-            holdProgressLabel.textContent = `Tahan ${remaining.toFixed(1)} dtk...`;
+            holdProgressLabel.textContent = `Tahan ${remaining.toFixed(1)} dtk`;
         } else {
-            holdProgressLabel.textContent = "Tahan isyarat ~1,5 dtk";
+            holdProgressLabel.textContent = "Tahan ~1,5 dtk";
         }
     }
+}
+
+function renderWordSuggestions() {
+    if (!wordSuggestionsEl) return;
+
+    wordSuggestionsEl.innerHTML = "";
+
+    if (!currentWord || currentWord.length < 2) {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "word-suggestion empty";
+        btn.disabled = true;
+        btn.textContent = currentWord.length === 1
+            ? "Ketik 1 huruf lagi untuk prediksi..."
+            : "Mengetik isyarat...";
+        wordSuggestionsEl.appendChild(btn);
+        return;
+    }
+
+    if (isFetchingSuggestions) {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "word-suggestion loading";
+        btn.disabled = true;
+        btn.innerHTML = `<i class="fa-solid fa-circle-notch fa-spin"></i> Mencari kata...`;
+        wordSuggestionsEl.appendChild(btn);
+        return;
+    }
+
+    if (wordSuggestions.length === 0) {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "word-suggestion empty";
+        btn.disabled = true;
+        btn.textContent = "Tidak ada prediksi cocok";
+        wordSuggestionsEl.appendChild(btn);
+        return;
+    }
+
+    wordSuggestions.slice(0, 3).forEach((word, index) => {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "word-suggestion";
+        btn.title = `Pilih "${word}" (tekan ${index + 1})`;
+        btn.innerHTML = `<span class="word-suggestion-key">${index + 1}</span><span class="word-suggestion-text">${word}</span>`;
+        btn.addEventListener("click", () => selectWordSuggestion(index));
+        wordSuggestionsEl.appendChild(btn);
+    });
+
+    while (wordSuggestionsEl.children.length < 3) {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "word-suggestion empty";
+        btn.disabled = true;
+        btn.textContent = "—";
+        wordSuggestionsEl.appendChild(btn);
+    }
+}
+
+function scheduleWordSuggestionsFetch() {
+    const partial = currentWord.toLowerCase().trim();
+    const scheduleKey = `${partial}|${accumulatedWords.join(" ")}`;
+
+    if (partial.length < 2) {
+        if (lastScheduledPartial !== "") {
+            lastScheduledPartial = "";
+            wordSuggestions = [];
+            lastSuggestionRequest = "";
+            if (wordSuggestionDebounce) {
+                clearTimeout(wordSuggestionDebounce);
+                wordSuggestionDebounce = null;
+            }
+            renderWordSuggestions();
+        }
+        return;
+    }
+
+    if (scheduleKey === lastScheduledPartial) {
+        return;
+    }
+
+    lastScheduledPartial = scheduleKey;
+    if (wordSuggestionDebounce) {
+        clearTimeout(wordSuggestionDebounce);
+    }
+    wordSuggestionDebounce = setTimeout(fetchWordSuggestions, WORD_SUGGESTION_DEBOUNCE_MS);
+}
+
+async function fetchWordSuggestions() {
+    const partial = currentWord.toLowerCase().trim();
+    if (partial.length < 2) {
+        wordSuggestions = [];
+        renderWordSuggestions();
+        return;
+    }
+
+    const requestKey = `${partial}|${accumulatedWords.join(" ")}|${languageSelect ? languageSelect.value : "auto"}`;
+    if (requestKey === lastSuggestionRequest && wordSuggestions.length > 0) {
+        renderWordSuggestions();
+        return;
+    }
+
+    isFetchingSuggestions = true;
+    renderWordSuggestions();
+
+    try {
+        const response = await fetch('/predict_words', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                partial_word: partial,
+                context_words: accumulatedWords,
+                language: languageSelect ? languageSelect.value : "auto"
+            })
+        });
+
+        if (response.ok) {
+            const result = await response.json();
+            if (!result.error && partial === currentWord.toLowerCase().trim()) {
+                wordSuggestions = result.suggestions || [];
+                lastSuggestionRequest = requestKey;
+                if (result.detected_language) {
+                    lastDetectedLanguage = result.detected_language;
+                }
+            }
+        }
+    } catch (e) {
+        console.error("Gagal mengambil prediksi kata:", e);
+    } finally {
+        isFetchingSuggestions = false;
+        renderWordSuggestions();
+    }
+}
+
+function selectWordSuggestion(index) {
+    if (index < 0 || index >= wordSuggestions.length) return;
+
+    accumulatedWords.push(wordSuggestions[index].toLowerCase());
+    currentWord = "";
+    wordSuggestions = [];
+    lastSuggestionRequest = "";
+    lastScheduledPartial = "";
+    resetStableState();
+    updateSentenceBuilderUI();
+    renderWordSuggestions();
 }
 
 function handleSpaceAction() {
     if (currentWord) {
         accumulatedWords.push(currentWord.toLowerCase());
         currentWord = "";
+        wordSuggestions = [];
+        lastSuggestionRequest = "";
+        lastScheduledPartial = "";
         updateSentenceBuilderUI();
+        renderWordSuggestions();
     }
 }
 
@@ -552,13 +723,17 @@ function handleBackspaceAction() {
 function handleClearAction() {
     currentWord = "";
     accumulatedWords = [];
+    wordSuggestions = [];
+    lastSuggestionRequest = "";
+    lastScheduledPartial = "";
     resetStableState();
     if (refinedSentenceField) refinedSentenceField.textContent = "-";
-    if (aiSource) aiSource.textContent = "Offline";
+    if (aiSource) aiSource.textContent = defaultAiSourceStatus;
     if (thoughtList) {
         thoughtList.innerHTML = `<li class="empty-thought">Menunggu kata terkumpul...</li>`;
     }
     updateSentenceBuilderUI();
+    renderWordSuggestions();
 }
 
 async function refineSentenceWithAI() {
@@ -628,7 +803,7 @@ async function refineSentenceWithAI() {
         isRefining = false;
         if (btnRefine) {
             btnRefine.disabled = false;
-            btnRefine.innerHTML = `<i class="fa-solid fa-language"></i> Rangkai Kalimat`;
+            btnRefine.innerHTML = `<i class="fa-solid fa-language"></i> Rangkai`;
         }
     }
 }
@@ -666,11 +841,19 @@ if (btnBackspace) btnBackspace.addEventListener('click', handleBackspaceAction);
 if (btnClearSentence) btnClearSentence.addEventListener('click', handleClearAction);
 if (btnRefine) btnRefine.addEventListener('click', refineSentenceWithAI);
 if (btnSpeak) btnSpeak.addEventListener('click', speakSentence);
+if (languageSelect) {
+    languageSelect.addEventListener('change', () => {
+        lastSuggestionRequest = "";
+        lastScheduledPartial = "";
+        scheduleWordSuggestionsFetch();
+    });
+}
 
 // --- 5. START APP ---
 async function startApp() {
     populateDropdown();
     await fetchDatasetCounts();
+    renderWordSuggestions();
     
     try {
         await setupWebcam();

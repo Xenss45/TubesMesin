@@ -9,7 +9,7 @@ from flask import Flask, render_template, request, jsonify
 from flask_cors import CORS
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(encoding="utf-8-sig")
 
 warnings.filterwarnings('ignore')
 
@@ -21,7 +21,7 @@ except ImportError:
 
 # Set Keras backend sebelum import
 os.environ['KERAS_BACKEND'] = 'jax'
-from keras import models
+from model_utils import load_model_compatible
 
 app = Flask(__name__)
 CORS(app)
@@ -39,7 +39,7 @@ if not os.path.exists(model_path):
     print(f"[ERROR] Model file '{model_path}' tidak ditemukan!")
 else:
     try:
-        model = models.load_model(model_path)
+        model = load_model_compatible(model_path)
         print("[OK] Model CNN berhasil dimuat.")
     except Exception as e:
         print(f"[ERROR] Error memuat model: {e}")
@@ -158,7 +158,7 @@ def preprocess_for_prediction(roi):
 
 @app.route('/')
 def index():
-    return render_template('index.html')
+    return render_template('index.html', ai_source_status=AI_SOURCE_STATUS)
 
 @app.route('/predict', methods=['POST'])
 def predict():
@@ -267,9 +267,15 @@ def get_dataset_counts():
         return jsonify({"error": str(e)}), 500
 
 # --- ASISTEN PENERJEMAH BAHASA ISYARAT HELPERS ---
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+GEMINI_API_KEY = (os.environ.get("GEMINI_API_KEY") or "").strip()
+AI_SOURCE_STATUS = "Sistem Awan (Siap)" if HAS_GEMINI and GEMINI_API_KEY else "Sistem Lokal"
+
 if HAS_GEMINI and GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
+elif not HAS_GEMINI:
+    print("[WARN] Package google-generativeai belum terinstall. Fitur Gemini memakai fallback lokal.")
+else:
+    print("[WARN] GEMINI_API_KEY kosong. Isi file .env lalu restart app.py untuk mengaktifkan Gemini.")
 
 INDONESIAN_DICTIONARY = [
     "halo", "pagi", "siang", "sore", "malam", "apa", "kabar", "nama", "saya",
@@ -365,6 +371,100 @@ def local_refine_sentence(raw_text, language="auto"):
 
     return refined, thought_steps, detected_lang
 
+CONTEXT_FOLLOWS = {
+    "id": {
+        "saya": ["mau", "ingin", "suka", "bisa", "tidak", "lapar", "haus"],
+        "mau": ["makan", "minum", "tidur", "belajar", "pergi"],
+        "ingin": ["makan", "minum", "belajar", "pergi"],
+        "apa": ["kabar", "nama"],
+        "terima": ["kasih"],
+        "tidak": ["mau", "bisa", "suka"],
+    },
+    "en": {
+        "i": ["want", "need", "like", "can", "am"],
+        "want": ["eat", "drink", "sleep", "learn", "go"],
+        "thank": ["you"],
+        "how": ["are"],
+    },
+}
+
+def local_predict_words(partial_word, context_words, language="auto"):
+    partial = partial_word.lower().strip()
+    context_words = [w.lower().strip() for w in context_words if w.strip()]
+    detected_lang = resolve_language(language, context_words + [partial])
+
+    if len(partial) < 2:
+        return [], detected_lang
+
+    dictionary = DICTIONARIES.get(detected_lang, INDONESIAN_DICTIONARY)
+    follows_map = CONTEXT_FOLLOWS.get(detected_lang, {})
+    last_context = context_words[-1] if context_words else ""
+
+    scored = []
+    for word in dictionary:
+        if not word.startswith(partial):
+            continue
+        score = 100 - (len(word) - len(partial))
+        if last_context and word in follows_map.get(last_context, []):
+            score += 60
+        scored.append((score, word))
+
+    scored.sort(key=lambda item: (-item[0], item[1]))
+    suggestions = [word for _, word in scored[:3]]
+
+    if len(suggestions) < 3:
+        corrected = local_autocorrect(partial, detected_lang)
+        if corrected and corrected not in suggestions:
+            suggestions.insert(0, corrected)
+    suggestions = suggestions[:3]
+
+    return suggestions, detected_lang
+
+def gemini_predict_words(partial_word, context_words, language="auto"):
+    import json
+
+    partial = partial_word.lower().strip()
+    context = " ".join(context_words).strip()
+    lang_instruction = {
+        "id": "Berikan prediksi kata Bahasa Indonesia.",
+        "en": "Provide English word predictions.",
+        "auto": "Deteksi bahasa dari konteks, lalu berikan prediksi kata dalam bahasa tersebut.",
+    }
+
+    try:
+        model = genai.GenerativeModel("gemini-2.5-flash")
+        prompt = f"""
+        Kamu adalah asisten prediksi kata untuk penerjemah bahasa isyarat.
+        Pengguna sedang mengetik kata secara huruf-per-huruf lewat isyarat tangan.
+        Berdasarkan konteks kalimat dan awalan kata yang sedang diketik, prediksi 3 kata lengkap paling masuk akal.
+
+        Preferensi bahasa: {language}
+        Instruksi: {lang_instruction.get(language, lang_instruction["auto"])}
+
+        Konteks kalimat sejauh ini: "{context}"
+        Awalan kata saat ini: "{partial}"
+
+        Format output HANYA JSON:
+        {{
+            "detected_language": "id atau en",
+            "suggestions": ["kata1", "kata2", "kata3"]
+        }}
+        """
+
+        response = model.generate_content(
+            prompt,
+            generation_config={"response_mime_type": "application/json"}
+        )
+        result = json.loads(response.text.strip())
+        suggestions = [s.lower().strip() for s in result.get("suggestions", []) if s]
+        detected_lang = result.get("detected_language", "id")
+        if detected_lang not in ("id", "en"):
+            detected_lang = resolve_language(language, context_words + [partial])
+        return suggestions[:3], detected_lang
+    except Exception as e:
+        print(f"[WARN] Gagal prediksi kata Gemini: {e}")
+        return local_predict_words(partial_word, context_words, language)
+
 def gemini_refine_sentence(raw_text, language="auto"):
     import json
 
@@ -419,6 +519,39 @@ def gemini_refine_sentence(raw_text, language="auto"):
         refined, thought, detected_lang = local_refine_sentence(raw_text, language)
         return refined, thought, detected_lang
 
+@app.route('/predict_words', methods=['POST'])
+def predict_words():
+    try:
+        data = request.get_json()
+        if not data or 'partial_word' not in data:
+            return jsonify({"error": "Parameter partial_word wajib diisi"}), 400
+
+        partial_word = (data.get('partial_word') or '').strip().lower()
+        context_words = data.get('context_words', [])
+        language = data.get('language', 'auto')
+
+        if len(partial_word) < 2:
+            return jsonify({
+                "suggestions": [],
+                "source": AI_SOURCE_STATUS,
+                "detected_language": resolve_language(language, context_words)
+            })
+
+        if HAS_GEMINI and GEMINI_API_KEY:
+            suggestions, detected_lang = gemini_predict_words(partial_word, context_words, language)
+            source = "Sistem Awan"
+        else:
+            suggestions, detected_lang = local_predict_words(partial_word, context_words, language)
+            source = "Sistem Lokal"
+
+        return jsonify({
+            "suggestions": suggestions,
+            "source": source,
+            "detected_language": detected_lang
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 @app.route('/refine_sentence', methods=['POST'])
 def refine_sentence():
     try:
@@ -456,6 +589,7 @@ if __name__ == '__main__':
     
     print("\n" + "="*70)
     print("[OK] Menjalankan server lokal Pengenal Isyarat Tangan.")
+    print(f"[INFO] Status AI penyusun kalimat: {AI_SOURCE_STATUS}")
     print("Buka browser dan buka: http://127.0.0.1:5000")
     print("="*70 + "\n")
     
