@@ -8,7 +8,6 @@ from keras import models
 
 
 def _strip_unsupported_layer_keys(obj):
-    """Hapus field Keras yang tidak dikenali versi lama saat load model .h5."""
     if isinstance(obj, dict):
         obj.pop("quantization_config", None)
         for value in obj.values():
@@ -19,10 +18,6 @@ def _strip_unsupported_layer_keys(obj):
 
 
 def load_model_compatible(model_path):
-    """
-    Muat model .h5 dengan kompatibilitas antar versi Keras.
-    Model yang disimpan di Keras 3.13+ bisa gagal di Keras 3.12 karena field quantization_config.
-    """
     if not os.path.exists(model_path):
         raise FileNotFoundError(f"Model file '{model_path}' tidak ditemukan.")
 
