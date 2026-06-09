@@ -627,12 +627,17 @@ function renderWordSuggestions() {
         return;
     }
 
+    const partial = currentWord.toLowerCase();
     wordSuggestions.slice(0, 3).forEach((word, index) => {
         const btn = document.createElement("button");
         btn.type = "button";
-        btn.className = "word-suggestion";
-        btn.title = `Pilih "${word}" (tekan ${index + 1})`;
-        btn.innerHTML = `<span class="word-suggestion-key">${index + 1}</span><span class="word-suggestion-text">${word}</span>`;
+        const isTypoFix = partial.length >= 2 && !word.toLowerCase().startsWith(partial);
+        btn.className = `word-suggestion${isTypoFix ? " word-suggestion-corrected" : ""}`;
+        btn.title = isTypoFix
+            ? `Koreksi "${partial}" → "${word}" (tekan ${index + 1})`
+            : `Pilih "${word}" (tekan ${index + 1})`;
+        const fixBadge = isTypoFix ? `<span class="word-suggestion-fix" title="Auto-koreksi typo">✓</span>` : "";
+        btn.innerHTML = `<span class="word-suggestion-key">${index + 1}</span><span class="word-suggestion-text">${word}</span>${fixBadge}`;
         btn.addEventListener("click", () => selectWordSuggestion(index));
         wordSuggestionsEl.appendChild(btn);
     });

@@ -1494,6 +1494,26 @@ kbd {
     white-space: nowrap;
 }
 
+.word-suggestion-corrected {
+    border-color: rgba(16, 185, 129, 0.45) !important;
+    background: rgba(16, 185, 129, 0.08) !important;
+}
+
+.word-suggestion-fix {
+    flex-shrink: 0;
+    font-size: 10px;
+    font-weight: 700;
+    color: var(--accent-green);
+    background: rgba(16, 185, 129, 0.2);
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin-left: auto;
+}
+
 .composer-result {
     display: flex;
     align-items: flex-start;

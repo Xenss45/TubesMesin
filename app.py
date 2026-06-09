@@ -332,6 +332,14 @@ def resolve_language(language, words):
         return lang
     return detect_language_local(words)
 
+def max_edit_distance(word_len):
+    """Batas jarak edit untuk fuzzy match berdasarkan panjang kata."""
+    if word_len <= 2:
+        return 1
+    if word_len <= 4:
+        return 2
+    return min(3, max(1, word_len // 2))
+
 def local_autocorrect(word, lang="id"):
     word = word.lower().strip()
     if not word:
@@ -343,10 +351,11 @@ def local_autocorrect(word, lang="id"):
 
     best_word = word
     best_dist = 999
+    limit = max_edit_distance(len(word))
 
     for dict_word in dictionary:
         dist = levenshtein_distance(word, dict_word)
-        if dist < best_dist and dist <= max(1, len(word) // 2):
+        if dist < best_dist and dist <= limit:
             best_dist = dist
             best_word = dict_word
 
@@ -388,6 +397,30 @@ CONTEXT_FOLLOWS = {
     },
 }
 
+def score_prediction_candidate(partial, word, last_context, follows_map):
+    """Skor kandidat prediksi: prefix match + fuzzy typo + bonus konteks."""
+    partial = partial.lower()
+    word = word.lower()
+    score = None
+
+    if word.startswith(partial):
+        score = 130 - (len(word) - len(partial)) * 2
+    else:
+        dist = levenshtein_distance(partial, word)
+        if dist <= max_edit_distance(len(partial)):
+            score = 95 - dist * 18
+            word_prefix = word[:len(partial)] if len(partial) <= len(word) else word
+            if len(partial) >= 2 and levenshtein_distance(partial, word_prefix) <= 1:
+                score += 12
+
+    if score is None:
+        return None
+
+    if last_context and word in follows_map.get(last_context, []):
+        score += 65
+
+    return score
+
 def local_predict_words(partial_word, context_words, language="auto"):
     partial = partial_word.lower().strip()
     context_words = [w.lower().strip() for w in context_words if w.strip()]
@@ -400,23 +433,21 @@ def local_predict_words(partial_word, context_words, language="auto"):
     follows_map = CONTEXT_FOLLOWS.get(detected_lang, {})
     last_context = context_words[-1] if context_words else ""
 
-    scored = []
+    candidates = {}
     for word in dictionary:
-        if not word.startswith(partial):
-            continue
-        score = 100 - (len(word) - len(partial))
-        if last_context and word in follows_map.get(last_context, []):
-            score += 60
-        scored.append((score, word))
+        score = score_prediction_candidate(partial, word, last_context, follows_map)
+        if score is not None:
+            candidates[word] = max(candidates.get(word, 0), score)
 
-    scored.sort(key=lambda item: (-item[0], item[1]))
-    suggestions = [word for _, word in scored[:3]]
+    corrected = local_autocorrect(partial, detected_lang)
+    if corrected != partial:
+        ac_score = 100
+        if last_context and corrected in follows_map.get(last_context, []):
+            ac_score += 65
+        candidates[corrected] = max(candidates.get(corrected, 0), ac_score)
 
-    if len(suggestions) < 3:
-        corrected = local_autocorrect(partial, detected_lang)
-        if corrected and corrected not in suggestions:
-            suggestions.insert(0, corrected)
-    suggestions = suggestions[:3]
+    ranked = sorted(candidates.items(), key=lambda item: (-item[1], item[0]))
+    suggestions = [word for word, _ in ranked[:3]]
 
     return suggestions, detected_lang
 
@@ -435,14 +466,20 @@ def gemini_predict_words(partial_word, context_words, language="auto"):
         model = genai.GenerativeModel("gemini-2.5-flash")
         prompt = f"""
         Kamu adalah asisten prediksi kata untuk penerjemah bahasa isyarat.
-        Pengguna sedang mengetik kata secara huruf-per-huruf lewat isyarat tangan.
-        Berdasarkan konteks kalimat dan awalan kata yang sedang diketik, prediksi 3 kata lengkap paling masuk akal.
+        Pengguna mengetik kata huruf-per-huruf lewat deteksi isyarat tangan.
+        Input SERING mengandung typo: huruf tertukar, kurang, lebih, atau salah urutan
+        (contoh: "mkan" -> "makan", "nakan" -> "makan", "mkn" -> "makan").
+
+        Tugas:
+        1. Perbaiki typo secara implisit berdasarkan konteks kalimat.
+        2. Prediksi 3 kata LENGKAP paling masuk akal untuk melanjutkan kalimat.
+        3. Prioritaskan kata yang cocok dengan konteks, bukan hanya awalan huruf.
 
         Preferensi bahasa: {language}
         Instruksi: {lang_instruction.get(language, lang_instruction["auto"])}
 
         Konteks kalimat sejauh ini: "{context}"
-        Awalan kata saat ini: "{partial}"
+        Kata parsial sedang diketik (bisa typo): "{partial}"
 
         Format output HANYA JSON:
         {{
@@ -460,6 +497,15 @@ def gemini_predict_words(partial_word, context_words, language="auto"):
         detected_lang = result.get("detected_language", "id")
         if detected_lang not in ("id", "en"):
             detected_lang = resolve_language(language, context_words + [partial])
+
+        if len(suggestions) < 3:
+            local_suggestions, _ = local_predict_words(partial_word, context_words, language)
+            for word in local_suggestions:
+                if word not in suggestions:
+                    suggestions.append(word)
+                if len(suggestions) >= 3:
+                    break
+
         return suggestions[:3], detected_lang
     except Exception as e:
         print(f"[WARN] Gagal prediksi kata Gemini: {e}")
