@@ -8,6 +8,11 @@ import os
 import sys
 import time
 import csv
+from datetime import datetime
+
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
 
 # Gunakan JAX backend untuk Keras agar cocok dengan script deteksi real-time
 os.environ['KERAS_BACKEND'] = 'jax'
@@ -22,11 +27,13 @@ dataset_dir = "dataset"
 train_csv_path = 'sign_mnist_train.csv'
 test_csv_path = 'sign_mnist_test.csv'
 model_output_path = 'sign_language_cnn_model.h5'
+evaluation_dir = 'evaluation_results'
 
-# Hardcode alfabet dan angka sesuai folder di dataset (35 kelas)
+# Hardcode alfabet dan angka sesuai folder di dataset (36 kelas)
 alphabet = "0123456789abcdefghijklmnopqrstuvwxyz"
 char_to_label = {char: idx for idx, char in enumerate(alphabet)}
-num_classes = len(alphabet)  # 35 kelas
+label_to_char = {idx: char for char, idx in char_to_label.items()}
+num_classes = len(alphabet)
 
 # --- 2. Helper Functions (Menggunakan Numpy & Standard Library agar bebas dependensi luar) ---
 def train_test_split_numpy(X, y, test_size=0.2, random_seed=42):
@@ -42,6 +49,199 @@ def train_test_split_numpy(X, y, test_size=0.2, random_seed=42):
     val_idx = indices[split_idx:]
     
     return X[train_idx], X[val_idx], y[train_idx], y[val_idx]
+
+def confusion_matrix_np(y_true, y_pred, num_classes):
+    cm = np.zeros((num_classes, num_classes), dtype=np.int32)
+    for true_label, pred_label in zip(y_true, y_pred):
+        cm[int(true_label), int(pred_label)] += 1
+    return cm
+
+def compute_classification_metrics(cm, active_labels):
+    """Hitung precision, recall, F1 per kelas dari confusion matrix."""
+    metrics = []
+    total_correct = int(np.trace(cm))
+    total_samples = int(cm.sum())
+
+    for label_idx in active_labels:
+        tp = cm[label_idx, label_idx]
+        fp = cm[:, label_idx].sum() - tp
+        fn = cm[label_idx, :].sum() - tp
+        support = cm[label_idx, :].sum()
+
+        precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+        recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+        f1 = (2 * precision * recall / (precision + recall)) if (precision + recall) > 0 else 0.0
+
+        metrics.append({
+            'label': label_idx,
+            'char': label_to_char[label_idx],
+            'precision': precision,
+            'recall': recall,
+            'f1': f1,
+            'support': int(support),
+        })
+
+    macro_f1 = np.mean([m['f1'] for m in metrics]) if metrics else 0.0
+    accuracy = total_correct / total_samples if total_samples > 0 else 0.0
+    return metrics, accuracy, macro_f1
+
+def get_top_confused_pairs(cm, active_labels, top_n=10):
+    pairs = []
+    for true_label in active_labels:
+        for pred_label in active_labels:
+            if true_label == pred_label:
+                continue
+            count = cm[true_label, pred_label]
+            if count > 0:
+                pairs.append({
+                    'true_char': label_to_char[true_label],
+                    'pred_char': label_to_char[pred_label],
+                    'count': int(count),
+                })
+    pairs.sort(key=lambda item: item['count'], reverse=True)
+    return pairs[:top_n]
+
+def predict_labels(model, X):
+    probs = model.predict(X, verbose=0)
+    return np.argmax(probs, axis=1)
+
+def evaluate_model(model, X, y, dataset_name):
+    print(f"\n{'=' * 70}")
+    print(f"[EVAL] Evaluasi pada dataset: {dataset_name}")
+    print(f"{'=' * 70}")
+
+    y_pred = predict_labels(model, X)
+    cm = confusion_matrix_np(y, y_pred, num_classes)
+    active_labels = sorted(np.unique(np.concatenate([y, y_pred])).astype(int).tolist())
+    class_metrics, accuracy, macro_f1 = compute_classification_metrics(cm, active_labels)
+    confused_pairs = get_top_confused_pairs(cm, active_labels)
+
+    print(f"  Accuracy : {accuracy * 100:.2f}%")
+    print(f"  Macro F1 : {macro_f1 * 100:.2f}%")
+    print(f"  Sampel   : {len(y)}")
+
+    print("\n  Laporan per kelas (yang muncul di data ini):")
+    print(f"  {'Kelas':<6} {'Prec':>7} {'Recall':>7} {'F1':>7} {'Support':>8}")
+    print(f"  {'-' * 40}")
+    for item in class_metrics:
+        print(
+            f"  {item['char']:<6} "
+            f"{item['precision'] * 100:>6.1f}% "
+            f"{item['recall'] * 100:>6.1f}% "
+            f"{item['f1'] * 100:>6.1f}% "
+            f"{item['support']:>8}"
+        )
+
+    if confused_pairs:
+        print("\n  Pasangan huruf yang paling sering tertukar:")
+        for pair in confused_pairs:
+            print(
+                f"    '{pair['true_char']}' -> '{pair['pred_char']}' "
+                f"({pair['count']} kali)"
+            )
+
+    return {
+        'dataset_name': dataset_name,
+        'accuracy': accuracy,
+        'macro_f1': macro_f1,
+        'cm': cm,
+        'active_labels': active_labels,
+        'class_metrics': class_metrics,
+        'confused_pairs': confused_pairs,
+        'y_true': y,
+        'y_pred': y_pred,
+    }
+
+def save_confusion_matrix_plot(cm, active_labels, save_path):
+    labels = [label_to_char[idx] for idx in active_labels]
+    sub_cm = cm[np.ix_(active_labels, active_labels)]
+
+    fig_size = max(8, len(active_labels) * 0.45)
+    plt.figure(figsize=(fig_size, fig_size))
+    plt.imshow(sub_cm, interpolation='nearest', cmap='Blues')
+    plt.title('Confusion Matrix (Validation)')
+    plt.colorbar()
+    tick_marks = np.arange(len(active_labels))
+    plt.xticks(tick_marks, labels, rotation=90)
+    plt.yticks(tick_marks, labels)
+    plt.xlabel('Prediksi')
+    plt.ylabel('Label Sebenarnya')
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150)
+    plt.close()
+
+def save_training_history_plot(history, save_path):
+    history_dict = history.history
+    epochs_ran = range(1, len(history_dict['loss']) + 1)
+
+    plt.figure(figsize=(10, 4))
+
+    plt.subplot(1, 2, 1)
+    plt.plot(epochs_ran, history_dict['loss'], label='Train Loss')
+    if 'val_loss' in history_dict:
+        plt.plot(epochs_ran, history_dict['val_loss'], label='Val Loss')
+    plt.title('Loss per Epoch')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+
+    plt.subplot(1, 2, 2)
+    plt.plot(epochs_ran, history_dict['accuracy'], label='Train Accuracy')
+    if 'val_accuracy' in history_dict:
+        plt.plot(epochs_ran, history_dict['val_accuracy'], label='Val Accuracy')
+    plt.title('Accuracy per Epoch')
+    plt.xlabel('Epoch')
+    plt.ylabel('Accuracy')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150)
+    plt.close()
+
+def save_evaluation_report(train_eval, val_eval, history, save_path):
+    with open(save_path, 'w', encoding='utf-8') as f:
+        f.write("LAPORAN EVALUASI MODEL BAHASA ISYARAT\n")
+        f.write(f"Waktu evaluasi: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write("=" * 70 + "\n\n")
+
+        final_train_acc = history.history['accuracy'][-1]
+        final_val_acc = history.history.get('val_accuracy', [0])[-1]
+        final_train_loss = history.history['loss'][-1]
+        final_val_loss = history.history.get('val_loss', [0])[-1]
+
+        f.write("RINGKASAN TRAINING TERAKHIR\n")
+        f.write(f"  Train Accuracy (epoch terakhir): {final_train_acc * 100:.2f}%\n")
+        f.write(f"  Val Accuracy   (epoch terakhir): {final_val_acc * 100:.2f}%\n")
+        f.write(f"  Train Loss     (epoch terakhir): {final_train_loss:.4f}\n")
+        f.write(f"  Val Loss       (epoch terakhir): {final_val_loss:.4f}\n\n")
+
+        for eval_result in (train_eval, val_eval):
+            f.write(f"{eval_result['dataset_name'].upper()}\n")
+            f.write(f"  Accuracy : {eval_result['accuracy'] * 100:.2f}%\n")
+            f.write(f"  Macro F1 : {eval_result['macro_f1'] * 100:.2f}%\n")
+            f.write(f"  Sampel   : {len(eval_result['y_true'])}\n\n")
+
+            f.write("  Per kelas:\n")
+            f.write(f"  {'Kelas':<6} {'Prec':>7} {'Recall':>7} {'F1':>7} {'Support':>8}\n")
+            for item in eval_result['class_metrics']:
+                f.write(
+                    f"  {item['char']:<6} "
+                    f"{item['precision'] * 100:>6.1f}% "
+                    f"{item['recall'] * 100:>6.1f}% "
+                    f"{item['f1'] * 100:>6.1f}% "
+                    f"{item['support']:>8}\n"
+                )
+
+            if eval_result['confused_pairs']:
+                f.write("\n  Pasangan huruf paling sering tertukar:\n")
+                for pair in eval_result['confused_pairs']:
+                    f.write(
+                        f"    '{pair['true_char']}' -> '{pair['pred_char']}' "
+                        f"({pair['count']} kali)\n"
+                    )
+            f.write("\n")
 
 def to_categorical_numpy(y, num_classes=25):
     """
@@ -240,12 +440,32 @@ except Exception as e:
     print(f"[ERROR] Terjadi kegagalan saat melatih model: {e}")
     sys.exit(1)
 
-# --- 8. Menyimpan Model ---
+# --- 8. Evaluasi Model ---
+os.makedirs(evaluation_dir, exist_ok=True)
+
+print("\n[INFO] Menjalankan evaluasi model...")
+train_eval = evaluate_model(model, X_train, y_train, "Training Set")
+val_eval = evaluate_model(model, X_val, y_val, "Validation Set")
+
+confusion_matrix_path = os.path.join(evaluation_dir, 'confusion_matrix.png')
+history_plot_path = os.path.join(evaluation_dir, 'training_history.png')
+report_path = os.path.join(evaluation_dir, 'evaluation_report.txt')
+
+save_confusion_matrix_plot(val_eval['cm'], val_eval['active_labels'], confusion_matrix_path)
+save_training_history_plot(history, history_plot_path)
+save_evaluation_report(train_eval, val_eval, history, report_path)
+
+print(f"\n[OK] Hasil evaluasi disimpan:")
+print(f"     - {report_path}")
+print(f"     - {confusion_matrix_path}")
+print(f"     - {history_plot_path}")
+
+# --- 9. Menyimpan Model ---
 try:
     print(f"\n[INFO] Menyimpan model baru ke '{model_output_path}'...")
     model.save(model_output_path)
     print(f"[OK] Model baru berhasil disimpan! Sekarang Anda bisa langsung menggunakan")
-    print(f"     'realtime_hand_recognition.py' dengan model baru ini.")
+    print(f"     'app.py' dengan model baru ini.")
 except Exception as e:
     print(f"[ERROR] Gagal menyimpan file model: {e}")
 

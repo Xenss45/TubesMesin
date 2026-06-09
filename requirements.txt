@@ -1,8 +1,12 @@
+flask
+flask-cors
 opencv-python
 numpy
 keras
 jax
+jaxlib
 h5py
-flask
-flask-cors
 google-generativeai
+python-dotenv
+matplotlib
+Pillow

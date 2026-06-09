@@ -7,6 +7,9 @@ import sys
 import warnings
 from flask import Flask, render_template, request, jsonify
 from flask_cors import CORS
+from dotenv import load_dotenv
+
+load_dotenv()
 
 warnings.filterwarnings('ignore')
 
@@ -97,6 +100,37 @@ def get_fixed_roi_coords(w, h, box_size=240):
     # Validasi batas frame
     return max(0, x_min), max(0, y_min), min(w, x_max), min(h, y_max)
 
+MIN_SKIN_PIXELS = 2500
+MIN_MEAN_BRIGHTNESS = 5
+
+def is_hand_in_roi(segmented_roi):
+    """Cek apakah ROI berisi tangan (bukan gambar full hitam)."""
+    gray_seg = cv2.cvtColor(segmented_roi, cv2.COLOR_BGR2GRAY)
+    skin_pixel_count = cv2.countNonZero(gray_seg)
+    if skin_pixel_count < MIN_SKIN_PIXELS:
+        return False, gray_seg
+    if float(np.mean(gray_seg)) < MIN_MEAN_BRIGHTNESS:
+        return False, gray_seg
+    return True, gray_seg
+
+def make_mini_roi_base64(gray_seg):
+    gray_resized = cv2.resize(gray_seg, (100, 100), interpolation=cv2.INTER_NEAREST)
+    _, buffer = cv2.imencode('.png', gray_resized)
+    return "data:image/png;base64," + base64.b64encode(buffer).decode('utf-8')
+
+def empty_prediction_response(x_min, y_min, x_max, y_max, gray_seg=None):
+    mini_roi = make_mini_roi_base64(gray_seg) if gray_seg is not None else ""
+    return jsonify({
+        "char": "?",
+        "confidence": 0.0,
+        "hand_detected": False,
+        "x_min": x_min,
+        "y_min": y_min,
+        "x_max": x_max,
+        "y_max": y_max,
+        "mini_roi": mini_roi
+    })
+
 def preprocess_for_prediction(roi):
     """
     Ubah ROI menjadi format 28x28 grayscale dengan background hitam pekat
@@ -140,70 +174,34 @@ def predict():
         h, w = frame.shape[:2]
         x_min, y_min, x_max, y_max = get_fixed_roi_coords(w, h)
         
-        # Potong ROI dari frame asli (sebelum di-mirror) agar posisinya pas dengan kotak di layar
+        # Potong ROI lalu flip horizontal (selalu mirror untuk tangan kanan + tampilan cermin)
         roi = frame[y_min:y_max, x_min:x_max]
-        
-        # Jika mirror_mode aktif, balikkan ROI secara horizontal agar sesuai representasi cermin
-        mirror_mode = data.get('mirror_mode', True)
-        if mirror_mode:
-            roi = cv2.flip(roi, 1)
+        roi = cv2.flip(roi, 1)
         
         if roi.size > 0:
             input_image, segmented_roi = preprocess_for_prediction(roi)
             if input_image is not None and model is not None:
-                # Cek jika ROI kosong (jumlah piksel kulit terlalu sedikit)
-                gray_seg = cv2.cvtColor(segmented_roi, cv2.COLOR_BGR2GRAY)
-                skin_pixel_count = cv2.countNonZero(gray_seg)
-                
-                # Threshold piksel kulit minimal untuk menyatakan ada tangan di dalam kotak ROI
-                # Ukuran kotak ROI adalah 240x240 = 57,600 piksel. 1500 piksel adalah ~2.6% dari total area.
-                MIN_SKIN_PIXELS = 1500
-                
-                if skin_pixel_count < MIN_SKIN_PIXELS:
-                    # Buat versi mini 100x100 grayscale untuk dikirim ke JS (verifikasi input CNN)
-                    gray_resized = cv2.resize(gray_seg, (100, 100), interpolation=cv2.INTER_NEAREST)
-                    _, buffer = cv2.imencode('.png', gray_resized)
-                    mini_roi_base64 = "data:image/png;base64," + base64.b64encode(buffer).decode('utf-8')
-                    
-                    return jsonify({
-                        "char": "?",
-                        "confidence": 0.0,
-                        "x_min": x_min,
-                        "y_min": y_min,
-                        "x_max": x_max,
-                        "y_max": y_max,
-                        "mini_roi": mini_roi_base64
-                    })
+                hand_detected, gray_seg = is_hand_in_roi(segmented_roi)
+                if not hand_detected:
+                    return empty_prediction_response(x_min, y_min, x_max, y_max, gray_seg)
                 
                 prediction = model.predict(input_image, verbose=0)
                 predicted_idx = np.argmax(prediction)
                 predicted_char = label_map.get(predicted_idx, "?")
                 confidence = float(prediction[0][predicted_idx])
                 
-                # Buat versi mini 100x100 grayscale untuk dikirim ke JS (verifikasi input CNN)
-                gray_resized = cv2.resize(gray_seg, (100, 100), interpolation=cv2.INTER_NEAREST)
-                _, buffer = cv2.imencode('.png', gray_resized)
-                mini_roi_base64 = "data:image/png;base64," + base64.b64encode(buffer).decode('utf-8')
-                
                 return jsonify({
                     "char": predicted_char,
                     "confidence": confidence,
+                    "hand_detected": True,
                     "x_min": x_min,
                     "y_min": y_min,
                     "x_max": x_max,
                     "y_max": y_max,
-                    "mini_roi": mini_roi_base64
+                    "mini_roi": make_mini_roi_base64(gray_seg)
                 })
         
-        return jsonify({
-            "char": "?",
-            "confidence": 0.0,
-            "x_min": x_min,
-            "y_min": y_min,
-            "x_max": x_max,
-            "y_max": y_max,
-            "mini_roi": ""
-        })
+        return empty_prediction_response(x_min, y_min, x_max, y_max)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -225,13 +223,9 @@ def save_dataset():
         h, w = frame.shape[:2]
         x_min, y_min, x_max, y_max = get_fixed_roi_coords(w, h)
         
-        # Potong ROI dari frame asli (sebelum di-mirror) agar posisinya pas dengan kotak di layar
+        # Potong ROI lalu flip horizontal (selalu mirror untuk tangan kanan + tampilan cermin)
         roi = frame[y_min:y_max, x_min:x_max]
-        
-        # Jika mirror_mode aktif, balikkan ROI secara horizontal agar sesuai representasi cermin
-        mirror_mode = data.get('mirror_mode', True)
-        if mirror_mode:
-            roi = cv2.flip(roi, 1)
+        roi = cv2.flip(roi, 1)
         
         if roi.size > 0:
             # Terapkan segmentasi warna kulit dan simpan dalam ukuran 200x200
@@ -278,15 +272,30 @@ if HAS_GEMINI and GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
 
 INDONESIAN_DICTIONARY = [
-    "halo", "hello", "pagi", "siang", "sore", "malam", "apa", "kabar", "nama", "saya", 
-    "kamu", "dia", "mereka", "kita", "bisa", "tidak", "suka", "makan", "minum", "tidur", 
-    "belajar", "isyarat", "bahasa", "terima", "kasih", "sama", "sama", "tolong", "maaf", 
-    "sehat", "sakit", "lapar", "haus", "senang", "sedih", "marah", "takut", "mau", 
-    "ingin", "pergi", "pulang", "datang", "di", "ke", "dari", "ini", "itu", "ada", 
-    "sudah", "belum", "sedang", "akan", "dan", "atau", "dengan", "untuk", "nasi", 
+    "halo", "pagi", "siang", "sore", "malam", "apa", "kabar", "nama", "saya",
+    "kamu", "dia", "mereka", "kita", "bisa", "tidak", "suka", "makan", "minum", "tidur",
+    "belajar", "isyarat", "bahasa", "terima", "kasih", "sama", "tolong", "maaf",
+    "sehat", "sakit", "lapar", "haus", "senang", "sedih", "marah", "takut", "mau",
+    "ingin", "pergi", "pulang", "datang", "di", "ke", "dari", "ini", "itu", "ada",
+    "sudah", "belum", "sedang", "akan", "dan", "atau", "dengan", "untuk", "nasi",
     "buku", "pulpen", "sekolah", "rumah", "jalan", "siapa", "mengapa", "bagaimana",
     "satu", "dua", "tiga", "empat", "lima", "enam", "tujuh", "delapan", "sembilan", "sepuluh"
 ]
+
+ENGLISH_DICTIONARY = [
+    "hello", "hi", "good", "morning", "afternoon", "evening", "night", "what", "how",
+    "name", "i", "you", "he", "she", "they", "we", "can", "cannot", "like", "eat",
+    "drink", "sleep", "learn", "sign", "language", "thank", "thanks", "please", "sorry",
+    "healthy", "sick", "hungry", "thirsty", "happy", "sad", "angry", "afraid", "want",
+    "need", "go", "come", "home", "school", "book", "pen", "food", "water", "help",
+    "yes", "no", "the", "a", "an", "is", "are", "am", "my", "your", "this", "that",
+    "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten"
+]
+
+DICTIONARIES = {
+    "id": INDONESIAN_DICTIONARY,
+    "en": ENGLISH_DICTIONARY,
+}
 
 def levenshtein_distance(s1, s2):
     if len(s1) < len(s2):
@@ -306,77 +315,109 @@ def levenshtein_distance(s1, s2):
         
     return previous_row[-1]
 
-def local_autocorrect(word):
+def detect_language_local(words):
+    id_matches = sum(1 for w in words if w.lower() in INDONESIAN_DICTIONARY)
+    en_matches = sum(1 for w in words if w.lower() in ENGLISH_DICTIONARY)
+    return "en" if en_matches > id_matches else "id"
+
+def resolve_language(language, words):
+    lang = (language or "auto").lower()
+    if lang in ("id", "en"):
+        return lang
+    return detect_language_local(words)
+
+def local_autocorrect(word, lang="id"):
     word = word.lower().strip()
     if not word:
-        return ""
-    if word in INDONESIAN_DICTIONARY:
         return word
-        
+
+    dictionary = DICTIONARIES.get(lang, INDONESIAN_DICTIONARY)
+    if word in dictionary:
+        return word
+
     best_word = word
     best_dist = 999
-    
-    for dict_word in INDONESIAN_DICTIONARY:
+
+    for dict_word in dictionary:
         dist = levenshtein_distance(word, dict_word)
-        # Ambil yang jaraknya kecil, maksimal setengah panjang kata asal
         if dist < best_dist and dist <= max(1, len(word) // 2):
             best_dist = dist
             best_word = dict_word
-            
+
     return best_word
 
-def local_refine_sentence(raw_text):
+def local_refine_sentence(raw_text, language="auto"):
     words = raw_text.split()
+    detected_lang = resolve_language(language, words)
     corrected_words = []
-    thought_steps = ["Menganalisis masukan kata secara lokal..."]
-    
+    thought_steps = [f"Menganalisis masukan kata secara lokal ({detected_lang.upper()})..."]
+
     for word in words:
-        corrected = local_autocorrect(word)
-        if corrected != word:
+        corrected = local_autocorrect(word, detected_lang)
+        if corrected != word.lower():
             thought_steps.append(f"Koreksi kata: '{word}' -> '{corrected}'")
-            corrected_words.append(corrected)
-        else:
-            corrected_words.append(word)
-            
+        corrected_words.append(corrected)
+
     refined = " ".join(corrected_words)
     if refined:
-        refined = refined.capitalize() + "."
+        refined = refined[0].upper() + refined[1:] + "."
     thought_steps.append("Penyusunan kalimat selesai.")
-    
-    return refined, thought_steps
 
-def gemini_refine_sentence(raw_text):
+    return refined, thought_steps, detected_lang
+
+def gemini_refine_sentence(raw_text, language="auto"):
+    import json
+
+    lang_instruction = {
+        "id": "Rapikan menjadi kalimat Bahasa Indonesia yang benar.",
+        "en": "Refine into a proper English sentence.",
+        "auto": "Deteksi apakah input lebih cocok Bahasa Indonesia atau Inggris, lalu rapikan dalam bahasa tersebut.",
+    }
+    instruction = lang_instruction.get(language, lang_instruction["auto"])
+
     try:
         model = genai.GenerativeModel("gemini-2.5-flash")
-        
+
         prompt = f"""
-        Kamu adalah Asisten Penerjemah Bahasa Isyarat Indonesia.
-        Tugasmu adalah merapikan urutan kata mentah hasil deteksi bahasa isyarat menjadi kalimat bahasa Indonesia yang rapi, padat, ber-tata bahasa benar, dan mudah dipahami.
-        Biasanya kata mentah mengandung typo ejaan atau merupakan gabungan kata kerja/kata benda dasar (karena bahasa isyarat seringkali tidak menggunakan imbuhan secara penuh).
-        
+        Kamu adalah Asisten Penerjemah Bahasa Isyarat.
+        Tugasmu merapikan urutan kata mentah hasil deteksi isyarat menjadi kalimat yang rapi dan mudah dipahami.
+        Kata mentah sering mengandung typo ejaan atau kata dasar tanpa imbuhan lengkap.
+
+        Preferensi bahasa: {language}
+        Instruksi: {instruction}
+
         Kata mentah yang dideteksi: "{raw_text}"
-        
-        Format output yang harus kamu berikan harus berupa JSON dengan struktur berikut:
+
+        Format output HANYA JSON:
         {{
-            "thought": "Analisis singkat dalam menyusun kata menjadi kalimat bahasa Indonesia yang baik.",
-            "refined": "Hasil akhir kalimat bahasa Indonesia yang sudah rapi dan benar (lengkap dengan tanda baca, diawali huruf kapital)."
+            "detected_language": "id atau en",
+            "thought": "Analisis singkat proses koreksi dan penyusunan kalimat.",
+            "refined": "Kalimat akhir yang sudah rapi (huruf kapital di awal, tanda baca di akhir).",
+            "corrections": [{{"from": "kata_salah", "to": "kata_benar"}}]
         }}
-        
-        Ingat, kembalikan HANYA format JSON di atas, jangan tambahkan markdown atau teks penjelas lain di luar JSON.
         """
-        
+
         response = model.generate_content(
             prompt,
             generation_config={"response_mime_type": "application/json"}
         )
-        
-        import json
+
         result = json.loads(response.text.strip())
-        return result.get("refined", ""), [result.get("thought", "Analisis kata selesai.")]
+        thought = [result.get("thought", "Analisis kata selesai.")]
+        corrections = result.get("corrections", [])
+        for corr in corrections:
+            if corr.get("from") and corr.get("to"):
+                thought.append(f"Koreksi: '{corr['from']}' -> '{corr['to']}'")
+
+        detected_lang = result.get("detected_language", "id")
+        if detected_lang not in ("id", "en"):
+            detected_lang = resolve_language(language, raw_text.split())
+
+        return result.get("refined", ""), thought, detected_lang
     except Exception as e:
         print(f"[WARN] Gagal menggunakan Gemini API: {e}")
-        # Fallback ke lokal
-        return local_refine_sentence(raw_text)
+        refined, thought, detected_lang = local_refine_sentence(raw_text, language)
+        return refined, thought, detected_lang
 
 @app.route('/refine_sentence', methods=['POST'])
 def refine_sentence():
@@ -384,23 +425,25 @@ def refine_sentence():
         data = request.get_json()
         if not data or 'raw_text' not in data:
             return jsonify({"error": "Data raw_text tidak dikirimkan"}), 400
-            
+
         raw_text = data['raw_text']
+        language = data.get('language', 'auto')
+
         if not raw_text.strip():
-            return jsonify({"refined": "", "thought": ["Input kosong."] })
-            
-        # Gunakan Gemini jika API Key ada, jika tidak, gunakan local fallback
+            return jsonify({"refined": "", "thought": ["Input kosong."], "detected_language": "id"})
+
         if HAS_GEMINI and GEMINI_API_KEY:
-            refined, thought = gemini_refine_sentence(raw_text)
+            refined, thought, detected_lang = gemini_refine_sentence(raw_text, language)
             source = "Sistem Awan"
         else:
-            refined, thought = local_refine_sentence(raw_text)
+            refined, thought, detected_lang = local_refine_sentence(raw_text, language)
             source = "Sistem Lokal"
-            
+
         return jsonify({
             "refined": refined,
             "thought": thought,
-            "source": source
+            "source": source,
+            "detected_language": detected_lang
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500

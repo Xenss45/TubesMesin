@@ -9,10 +9,13 @@ let lastPrediction = null;
 let currentWord = "";
 let accumulatedWords = [];
 let stableLetter = null;
-let stableFramesCount = 0;
-const REQUIRED_STABLE_FRAMES = 8; // Sekitar 1 detik (prediksi jalan tiap 120ms)
+let stableLetterSince = null;
+const HOLD_DURATION_MS = 1500;
+const MIN_CONFIDENCE = 0.65;
+const PREDICTION_INTERVAL_MS = 120;
 let isRefining = false;
-let hasTypedCurrentSign = false; // Mencegah huruf terketik berulang kali tanpa melepas tangan
+let hasTypedCurrentSign = false;
+let lastDetectedLanguage = "id";
 
 // DOM ELEMENTS
 const video = document.getElementById('webcam');
@@ -22,7 +25,6 @@ const selectChar = document.getElementById('char-select');
 const btnPrev = document.getElementById('btn-prev-char');
 const btnNext = document.getElementById('btn-next-char');
 const btnCapture = document.getElementById('btn-capture');
-const mirrorMode = document.getElementById('mirror-mode');
 const loader = document.getElementById('webcam-loader');
 const predictedLetter = document.getElementById('predicted-letter');
 const confidencePercent = document.getElementById('confidence-percentage');
@@ -30,7 +32,6 @@ const confidenceProgress = document.getElementById('confidence-progress');
 const cnnPreview = document.getElementById('cnn-input-preview');
 const totalSamplesBadge = document.getElementById('total-samples');
 const statsGrid = document.getElementById('stats-grid');
-const viewportContainer = document.querySelector('.webcam-viewport');
 
 // DOM Sentence Builder
 const activeCharDisplay = document.getElementById('active-char-display');
@@ -47,6 +48,9 @@ const btnBackspace = document.getElementById('btn-backspace');
 const btnClearSentence = document.getElementById('btn-clear-sentence');
 const btnRefine = document.getElementById('btn-refine');
 const btnSpeak = document.getElementById('btn-speak');
+const languageSelect = document.getElementById('language-select');
+const holdProgressBar = document.getElementById('hold-progress-bar');
+const holdProgressLabel = document.getElementById('hold-progress-label');
 
 // Canvas tersembunyi untuk grab frame gambar mentah
 const grabCanvas = document.createElement('canvas');
@@ -81,11 +85,6 @@ async function setupWebcam() {
             audio: false
         });
         video.srcObject = stream;
-        
-        // Sesuai mirror default
-        if (mirrorMode.checked) {
-            viewportContainer.classList.add('mirror-active');
-        }
         
         return new Promise((resolve) => {
             video.onloadedmetadata = () => {
@@ -160,6 +159,56 @@ function updateActiveHighlight() {
 
 // --- 2. LOGIKA UTAMA (PREDIKSI & DATASET) ---
 
+function resetStableState() {
+    stableLetter = null;
+    stableLetterSince = null;
+    hasTypedCurrentSign = false;
+}
+
+function isValidPrediction(result) {
+    return result.hand_detected !== false
+        && result.char
+        && result.char !== "?"
+        && result.confidence >= MIN_CONFIDENCE;
+}
+
+function getHoldProgressPercent() {
+    if (!stableLetter || !stableLetterSince || hasTypedCurrentSign) return 0;
+    const elapsed = Date.now() - stableLetterSince;
+    return Math.min(100, (elapsed / HOLD_DURATION_MS) * 100);
+}
+
+function triggerWordPulse() {
+    currentWordField.classList.add('pulse-effect');
+    currentWordField.style.textShadow = '0 0 15px var(--accent-cyan)';
+    setTimeout(() => {
+        currentWordField.classList.remove('pulse-effect');
+        currentWordField.style.textShadow = '0 0 8px rgba(255, 255, 255, 0.2)';
+    }, 300);
+}
+
+function processStableLetter(result) {
+    const now = Date.now();
+
+    if (!isValidPrediction(result)) {
+        resetStableState();
+        return;
+    }
+
+    if (result.char === stableLetter) {
+        if (!hasTypedCurrentSign && stableLetterSince && (now - stableLetterSince) >= HOLD_DURATION_MS) {
+            currentWord += stableLetter;
+            hasTypedCurrentSign = true;
+            triggerWordPulse();
+        }
+        return;
+    }
+
+    stableLetter = result.char;
+    stableLetterSince = now;
+    hasTypedCurrentSign = false;
+}
+
 // Grab frame dan ubah ke format base64
 function getFrameBase64() {
     // Kita capture video frame apa adanya
@@ -181,8 +230,7 @@ async function runPrediction() {
                 'Content-Type': 'application/json'
             },
             body: JSON.stringify({
-                image: dataUrl,
-                mirror_mode: mirrorMode.checked
+                image: dataUrl
             })
         });
         
@@ -192,6 +240,7 @@ async function runPrediction() {
                 lastPrediction = {
                     char: result.char,
                     confidence: result.confidence,
+                    hand_detected: result.hand_detected !== false,
                     x_min: result.x_min,
                     y_min: result.y_min,
                     x_max: result.x_max,
@@ -199,44 +248,12 @@ async function runPrediction() {
                     timestamp: Date.now()
                 };
                 
-                // Update mini preview Input CNN
                 if (result.mini_roi) {
                     cnnPreview.src = result.mini_roi;
                 }
                 
-                updatePredictionUI(result.char, result.confidence);
-
-                // --- KESTABILAN HURUF (DEBOUNCE) ---
-                if (result.char && result.char !== "?" && result.confidence > 0.65) {
-                    if (result.char === stableLetter) {
-                        if (!hasTypedCurrentSign) {
-                            stableFramesCount++;
-                            if (stableFramesCount >= REQUIRED_STABLE_FRAMES) {
-                                // Tambah huruf ke kata aktif
-                                currentWord += stableLetter;
-                                stableFramesCount = 0;
-                                hasTypedCurrentSign = true; // Set flag agar tidak ngetik lagi terus-menerus
-                                
-                                // Visual blink/pulse effect pada kata aktif
-                                currentWordField.classList.add('pulse-effect');
-                                currentWordField.style.textShadow = '0 0 15px var(--accent-cyan)';
-                                setTimeout(() => {
-                                    currentWordField.classList.remove('pulse-effect');
-                                    currentWordField.style.textShadow = '0 0 8px rgba(255, 255, 255, 0.2)';
-                                }, 300);
-                            }
-                        }
-                    } else {
-                        stableLetter = result.char;
-                        stableFramesCount = 1;
-                        hasTypedCurrentSign = false; // Reset flag karena tanda sudah berubah
-                    }
-                } else {
-                    stableLetter = null;
-                    stableFramesCount = 0;
-                    hasTypedCurrentSign = false; // Reset flag karena tangan turun
-                }
-                
+                updatePredictionUI(result.char, result.confidence, result.hand_detected);
+                processStableLetter(result);
                 updateSentenceBuilderUI();
             }
         }
@@ -248,11 +265,11 @@ async function runPrediction() {
 }
 
 // Update prediksi utama di panel HUD kanan
-function updatePredictionUI(char, confidence) {
+function updatePredictionUI(char, confidence, handDetected = true) {
     const percentage = Math.round(confidence * 100);
     const wrapper = document.querySelector('.predicted-char-wrapper');
     
-    if (char && char !== "?") {
+    if (handDetected && char && char !== "?") {
         predictedLetter.textContent = char;
         confidencePercent.textContent = `${percentage}%`;
         confidenceProgress.style.width = `${percentage}%`;
@@ -292,8 +309,7 @@ async function captureAndSaveDataset() {
             },
             body: JSON.stringify({
                 image: dataUrl,
-                char: targetChar,
-                mirror_mode: mirrorMode.checked
+                char: targetChar
             })
         });
         
@@ -339,17 +355,21 @@ function renderHUDLoop() {
     let boxColor = "#3b82f6"; // Biru default
     let predText = "";
     
-    // Jika ada prediksi terbaru (kurang dari 1 detik yang lalu)
     if (lastPrediction && (Date.now() - lastPrediction.timestamp < 1000)) {
-        const percentage = Math.round(lastPrediction.confidence * 100);
-        if (percentage > 60) {
-            boxColor = "#10b981"; // Hijau jika confident
-        } else if (percentage > 30) {
-            boxColor = "#f59e0b"; // Oranye jika ragu-ragu
-        }
-        
-        if (lastPrediction.char && lastPrediction.char !== "?") {
-            predText = `Prediksi: ${lastPrediction.char.toUpperCase()} (${percentage}%)`;
+        if (!lastPrediction.hand_detected) {
+            boxColor = "#64748b";
+            predText = "Tidak ada tangan terdeteksi";
+        } else {
+            const percentage = Math.round(lastPrediction.confidence * 100);
+            if (percentage > 60) {
+                boxColor = "#10b981";
+            } else if (percentage > 30) {
+                boxColor = "#f59e0b";
+            }
+
+            if (lastPrediction.char && lastPrediction.char !== "?") {
+                predText = `Prediksi: ${lastPrediction.char.toUpperCase()} (${percentage}%)`;
+            }
         }
     }
     
@@ -410,15 +430,6 @@ function renderHUDLoop() {
 }
 
 // --- 4. EVENT LISTENERS & SHORTCUTS ---
-
-// Mirror mode toggle
-mirrorMode.addEventListener('change', () => {
-    if (mirrorMode.checked) {
-        viewportContainer.classList.add('mirror-active');
-    } else {
-        viewportContainer.classList.remove('mirror-active');
-    }
-});
 
 // Ganti huruf target
 selectChar.addEventListener('change', () => {
@@ -505,12 +516,19 @@ function updateSentenceBuilderUI() {
         rawTextField.textContent = rawSentence ? rawSentence : "-";
     }
     
-    // Update progress ring
-    if (stableLetter && stableFramesCount > 0) {
-        const pct = (stableFramesCount / REQUIRED_STABLE_FRAMES) * 100;
-        setProgress(pct);
-    } else {
-        setProgress(0);
+    const holdPct = getHoldProgressPercent();
+    setProgress(holdPct);
+
+    if (holdProgressBar) {
+        holdProgressBar.style.width = `${holdPct}%`;
+    }
+    if (holdProgressLabel) {
+        if (stableLetter && !hasTypedCurrentSign) {
+            const remaining = Math.max(0, (HOLD_DURATION_MS - (Date.now() - (stableLetterSince || Date.now()))) / 1000);
+            holdProgressLabel.textContent = `Tahan ${remaining.toFixed(1)} dtk...`;
+        } else {
+            holdProgressLabel.textContent = "Tahan isyarat ~1,5 dtk";
+        }
     }
 }
 
@@ -534,6 +552,7 @@ function handleBackspaceAction() {
 function handleClearAction() {
     currentWord = "";
     accumulatedWords = [];
+    resetStableState();
     if (refinedSentenceField) refinedSentenceField.textContent = "-";
     if (aiSource) aiSource.textContent = "Offline";
     if (thoughtList) {
@@ -568,14 +587,23 @@ async function refineSentenceWithAI() {
             headers: {
                 'Content-Type': 'application/json'
             },
-            body: JSON.stringify({ raw_text: rawSentence })
+            body: JSON.stringify({
+                raw_text: rawSentence,
+                language: languageSelect ? languageSelect.value : "auto"
+            })
         });
         
         if (response.ok) {
             const result = await response.json();
             if (!result.error) {
                 if (refinedSentenceField) refinedSentenceField.textContent = result.refined;
-                if (aiSource) aiSource.textContent = result.source;
+                if (aiSource) {
+                    const langLabel = result.detected_language === "en" ? "EN" : "ID";
+                    aiSource.textContent = `${result.source} (${langLabel})`;
+                }
+                if (result.detected_language) {
+                    lastDetectedLanguage = result.detected_language;
+                }
                 
                 if (thoughtList) {
                     thoughtList.innerHTML = "";
@@ -612,7 +640,11 @@ function speakSentence() {
     
     if ('speechSynthesis' in window) {
         const utterance = new SpeechSynthesisUtterance(text);
-        utterance.lang = 'id-ID'; // Menggunakan suara Bahasa Indonesia
+        const selectedLang = languageSelect ? languageSelect.value : "auto";
+        const speakLang = selectedLang === "en" || (selectedLang === "auto" && lastDetectedLanguage === "en")
+            ? "en-US"
+            : "id-ID";
+        utterance.lang = speakLang;
         window.speechSynthesis.speak(utterance);
         
         if (btnSpeak) {
@@ -643,10 +675,8 @@ async function startApp() {
     try {
         await setupWebcam();
         
-        // Jalankan loop prediksi server setiap 120ms
-        setInterval(runPrediction, 120);
-        
-        // Jalankan loop rendering overlay visual (FPS normal 60fps)
+        setInterval(runPrediction, PREDICTION_INTERVAL_MS);
+        setInterval(updateSentenceBuilderUI, 50);
         requestAnimationFrame(renderHUDLoop);
     } catch (err) {
         console.error("Gagal memulai aplikasi:", err);

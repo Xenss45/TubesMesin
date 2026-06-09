@@ -37,15 +37,8 @@
             <div class="card webcam-card">
                 <div class="card-header">
                     <h2><i class="fa-solid fa-camera"></i> Area Kamera</h2>
-                    <div class="controls-quick">
-                        <label class="switch-container">
-                            <input type="checkbox" id="mirror-mode" checked>
-                            <span class="switch-slider"></span>
-                            <span class="switch-label">Mode Cermin</span>
-                        </label>
-                    </div>
                 </div>
-                <div class="webcam-viewport">
+                <div class="webcam-viewport mirror-active">
                     <video id="webcam" width="640" height="480" autoplay playsinline></video>
                     <canvas id="overlay" width="640" height="480"></canvas>
                     
@@ -129,6 +122,12 @@
                         <div class="active-detection-bar">
                             <span class="active-label">Membaca Huruf:</span>
                             <span class="active-value" id="active-char-display">-</span>
+                            <div class="hold-progress-container">
+                                <div class="hold-progress-bg">
+                                    <div id="hold-progress-bar" class="hold-progress-fill"></div>
+                                </div>
+                                <span class="hold-progress-label" id="hold-progress-label">Tahan isyarat ~1,5 dtk</span>
+                            </div>
                             <div class="progress-ring-container">
                                 <svg class="progress-ring" width="24" height="24">
                                     <circle class="progress-ring__circle" stroke="var(--accent-cyan)" stroke-width="3" fill="transparent" r="9" cx="12" cy="12"/>
@@ -175,6 +174,14 @@
                             <button id="btn-clear-sentence" class="btn btn-secondary" title="Reset (Shortcut: Esc)">
                                 <i class="fa-solid fa-trash-can"></i> Reset
                             </button>
+                        </div>
+                        <div class="language-select-group">
+                            <label for="language-select"><i class="fa-solid fa-globe"></i> Bahasa Output:</label>
+                            <select id="language-select" class="styled-select">
+                                <option value="auto" selected>Auto (Deteksi Otomatis)</option>
+                                <option value="id">Bahasa Indonesia</option>
+                                <option value="en">English</option>
+                            </select>
                         </div>
                         <div class="builder-main-actions">
                             <button id="btn-refine" class="btn btn-primary glow-btn" title="Rangkai Kalimat (Shortcut: Enter)">

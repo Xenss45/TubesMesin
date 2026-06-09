@@ -223,7 +223,7 @@ body {
     pointer-events: none; /* Klik bisa menembus canvas overlay */
 }
 
-/* Webcam Mirror Effect */
+/* Webcam mirror selalu aktif (tangan kanan + konsisten dengan preprocessing) */
 .mirror-active #webcam,
 .mirror-active #overlay {
     transform: scaleX(-1);
@@ -776,11 +776,41 @@ kbd {
 .active-detection-bar {
     display: flex;
     align-items: center;
+    flex-wrap: wrap;
     gap: 10px;
     background: rgba(0, 229, 255, 0.04);
     border: 1px solid rgba(0, 229, 255, 0.1);
     padding: 10px 15px;
     border-radius: var(--radius-sm);
+}
+
+.hold-progress-container {
+    flex: 1;
+    min-width: 140px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.hold-progress-bg {
+    width: 100%;
+    height: 6px;
+    background: rgba(255, 255, 255, 0.08);
+    border-radius: 999px;
+    overflow: hidden;
+}
+
+.hold-progress-fill {
+    height: 100%;
+    width: 0%;
+    background: linear-gradient(90deg, var(--accent-cyan), var(--accent-green));
+    border-radius: 999px;
+    transition: width 0.05s linear;
+}
+
+.hold-progress-label {
+    font-size: 11px;
+    color: var(--text-secondary);
 }
 
 .active-label {
@@ -923,6 +953,28 @@ kbd {
     display: grid;
     grid-template-columns: repeat(3, 1fr);
     gap: 8px;
+}
+
+.language-select-group {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+.language-select-group label {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    white-space: nowrap;
+}
+
+.language-select-group .styled-select {
+    flex: 1;
+    min-width: 180px;
 }
 
 .builder-main-actions {
