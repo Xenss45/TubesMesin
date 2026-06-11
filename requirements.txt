@@ -10,3 +10,6 @@ google-generativeai
 python-dotenv
 matplotlib
 Pillow
+mediapipe
+flatbuffers
+sounddevice

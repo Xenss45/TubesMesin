@@ -1,33 +1,42 @@
 # --- SCRIPT TRAINING BAHASA ISYARAT TANGAN ---
 # Script ini digunakan untuk melatih model CNN menggunakan dataset kustom Anda
-# (dari screenshot) dan menggabungkannya dengan dataset CSV (jika ada).
+# yang dikumpulkan lewat aplikasi (folder dataset/).
 
 import cv2
 import numpy as np
 import os
 import sys
-import time
-import csv
 from datetime import datetime
 
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
-# Gunakan JAX backend untuk Keras agar cocok dengan script deteksi real-time
+# Gunakan JAX backend untuk Keras agar konsisten dengan app.py
 os.environ['KERAS_BACKEND'] = 'jax'
-from keras import models, layers
+import keras
+from keras import models, layers, callbacks, optimizers, regularizers
+
+from dataset_utils import (
+    audit_dataset,
+    augment_batch,
+    preprocess_gray_for_cnn,
+    save_audit_report,
+)
 
 print("\n" + "="*70)
 print("[OK] SCRIPT TRAINING MODEL BAHASA ISYARAT")
 print("="*70 + "\n")
 
 # --- 1. Konfigurasi ---
-dataset_dir = "dataset"
-train_csv_path = 'sign_mnist_train.csv'
-test_csv_path = 'sign_mnist_test.csv'
-model_output_path = 'sign_language_cnn_model.h5'
-evaluation_dir = 'evaluation_results'
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+dataset_dir = os.path.join(BASE_DIR, "dataset")
+models_dir = os.path.join(BASE_DIR, "models")
+model_output_path = os.path.join(models_dir, "sign_language_cnn_model.h5")
+evaluation_dir = os.path.join(BASE_DIR, "evaluation_results")
+
+# Ukuran input model CNN (wajib 64x64 — harus sama dengan app.py)
+IMG_SIZE = 64
 
 # Hardcode alfabet dan angka sesuai folder di dataset (36 kelas)
 alphabet = "0123456789abcdefghijklmnopqrstuvwxyz"
@@ -37,18 +46,43 @@ num_classes = len(alphabet)
 
 # --- 2. Helper Functions (Menggunakan Numpy & Standard Library agar bebas dependensi luar) ---
 def train_test_split_numpy(X, y, test_size=0.2, random_seed=42):
-    """
-    Membagi dataset menjadi set training dan validation menggunakan numpy
-    """
+    """Stratified split — tiap kelas proporsional di train & val."""
     np.random.seed(random_seed)
-    indices = np.arange(len(X))
-    np.random.shuffle(indices)
-    
-    split_idx = int(len(X) * (1 - test_size))
-    train_idx = indices[:split_idx]
-    val_idx = indices[split_idx:]
-    
+    train_idx, val_idx = [], []
+    for label in np.unique(y):
+        idx = np.where(y == label)[0]
+        np.random.shuffle(idx)
+        n_val = max(1, int(round(len(idx) * test_size)))
+        val_idx.extend(idx[:n_val])
+        train_idx.extend(idx[n_val:])
+    train_idx = np.array(train_idx, dtype=np.int32)
+    val_idx = np.array(val_idx, dtype=np.int32)
+    np.random.shuffle(train_idx)
+    np.random.shuffle(val_idx)
     return X[train_idx], X[val_idx], y[train_idx], y[val_idx]
+
+
+class SignBatchDataset(keras.utils.PyDataset):
+    """Batch loader; augmentasi hanya saat training."""
+
+    def __init__(self, X, y_onehot, batch_size, augment=False):
+        super().__init__()
+        self.X = X
+        self.y = y_onehot
+        self.batch_size = batch_size
+        self.augment = augment
+
+    def __len__(self):
+        return int(np.ceil(len(self.X) / self.batch_size))
+
+    def __getitem__(self, index):
+        start = index * self.batch_size
+        end = min(start + self.batch_size, len(self.X))
+        batch_x = self.X[start:end]
+        batch_y = self.y[start:end]
+        if self.augment and np.random.rand() < 0.35:
+            batch_x = augment_batch(batch_x)
+        return batch_x, batch_y
 
 def confusion_matrix_np(y_true, y_pred, num_classes):
     cm = np.zeros((num_classes, num_classes), dtype=np.int32)
@@ -251,11 +285,14 @@ def to_categorical_numpy(y, num_classes=25):
     one_hot[np.arange(len(y)), y] = 1.0
     return one_hot
 
-# --- 3. Memuat Dataset Kustom (Screenshot) ---
-def load_custom_dataset():
+bad_files = set()
+
+
+def load_custom_dataset(skip_bad=True):
     X = []
     y = []
-    
+    skipped = 0
+
     if not os.path.exists(dataset_dir):
         print(f"[INFO] Folder '{dataset_dir}' tidak ditemukan. Membuat folder baru...")
         os.makedirs(dataset_dir, exist_ok=True)
@@ -263,29 +300,32 @@ def load_custom_dataset():
             os.makedirs(os.path.join(dataset_dir, char), exist_ok=True)
         return None, None
 
-    print("[INFO] Memindai gambar di folder dataset kustom...")
+    print("[INFO] Memuat gambar (center + resize 64x64, sama dengan app.py)...")
     total_loaded = 0
-    
+
     for char in alphabet:
         char_dir = os.path.join(dataset_dir, char)
         if not os.path.isdir(char_dir):
             continue
-            
+
         label = char_to_label[char]
-        files = [f for f in os.listdir(char_dir) if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
-        
+        files = [
+            f for f in os.listdir(char_dir)
+            if f.lower().endswith((".jpg", ".jpeg", ".png"))
+        ]
+
         for file_name in files:
+            if skip_bad and (char, file_name) in bad_files:
+                skipped += 1
+                continue
             file_path = os.path.join(char_dir, file_name)
             try:
-                # Load gambar dalam format grayscale
                 img = cv2.imread(file_path, cv2.IMREAD_GRAYSCALE)
                 if img is None:
                     continue
-                # Resize ke 28x28 (ukuran input model CNN)
-                img_resized = cv2.resize(img, (28, 28), interpolation=cv2.INTER_AREA)
-                # Normalisasi nilai piksel (0 - 1)
-                img_normalized = img_resized / 255.0
-                
+                img_normalized = preprocess_gray_for_cnn(img, IMG_SIZE)
+                if img_normalized is None:
+                    continue
                 X.append(img_normalized)
                 y.append(label)
                 total_loaded += 1
@@ -293,182 +333,153 @@ def load_custom_dataset():
                 print(f"[WARN] Gagal memuat gambar {file_path}: {e}")
 
     if total_loaded == 0:
-        print("[INFO] Tidak ada foto kustom (.jpg/.png) yang ditemukan di folder dataset.")
+        print("[INFO] Tidak ada foto valid yang bisa dimuat dari folder dataset.")
         return None, None
-        
-    print(f"[OK] Berhasil memuat {total_loaded} foto kustom dari folder dataset.")
-    
-    # Konversi ke numpy array dan tambahkan dimensi channel (28, 28, 1)
+
+    print(f"[OK] {total_loaded} foto dimuat ({skipped} bermasalah diskip).")
     X = np.array(X, dtype=np.float32)
     X = np.expand_dims(X, axis=-1)
     y = np.array(y, dtype=np.int32)
     return X, y
 
-# --- 4. Memuat Dataset CSV menggunakan built-in csv module ---
-def load_csv_dataset(csv_path):
-    if not os.path.exists(csv_path):
-        return None, None
-        
-    try:
-        print(f"[INFO] Memuat data dari {csv_path}...")
-        X = []
-        y = []
-        with open(csv_path, mode='r') as f:
-            reader = csv.reader(f)
-            # Skip header
-            header = next(reader)
-            
-            for row in reader:
-                if len(row) == 0:
-                    continue
-                # Kolom pertama adalah label
-                label = int(row[0])
-                # Kolom sisanya adalah piksel gambar 28x28
-                pixels = np.array(row[1:], dtype=np.float32).reshape(28, 28, 1) / 255.0
-                
-                X.append(pixels)
-                y.append(label)
-                
-        return np.array(X, dtype=np.float32), np.array(y, dtype=np.int32)
-    except Exception as e:
-        print(f"[WARN] Gagal memuat file CSV {csv_path}: {e}")
-        return None, None
+def build_cnn_model():
+    """CNN 64x64 — augmentasi di luar graph agar evaluasi konsisten."""
 
-# --- 5. Persiapan Seluruh Data ---
-X_custom, y_custom = load_custom_dataset()
+    def conv_block(x, filters, drop_rate=0.25):
+        x = layers.Conv2D(filters, (3, 3), padding="same", use_bias=False)(x)
+        x = layers.BatchNormalization()(x)
+        x = layers.Activation("relu")(x)
+        x = layers.Conv2D(filters, (3, 3), padding="same", use_bias=False)(x)
+        x = layers.BatchNormalization()(x)
+        x = layers.Activation("relu")(x)
+        x = layers.MaxPooling2D((2, 2))(x)
+        x = layers.Dropout(drop_rate)(x)
+        return x
 
-# Hanya muat dataset CSV bawaan jika melatih model 25 kelas (Sign MNIST asli)
-if num_classes == 25:
-    X_csv_train, y_csv_train = load_csv_dataset(train_csv_path)
-    X_csv_test, y_csv_test = load_csv_dataset(test_csv_path)
-else:
-    # Untuk dataset kustom 36 kelas (A-Z + 0-9), lewati data CSV lama agar label tidak tertukar
-    X_csv_train, y_csv_train = None, None
-    X_csv_test, y_csv_test = None, None
-
-# Gabungkan data training
-X_train_list = []
-y_train_list = []
-
-# Gabungkan data validasi
-X_val_list = []
-y_val_list = []
-
-# Jika ada data kustom (screenshot), bagi 80/20 untuk train/val
-if X_custom is not None:
-    X_c_train, X_c_val, y_c_train, y_c_val = train_test_split_numpy(X_custom, y_custom, test_size=0.2)
-    X_train_list.append(X_c_train)
-    y_train_list.append(y_c_train)
-    X_val_list.append(X_c_val)
-    y_val_list.append(y_c_val)
-    print(f"[INFO] Data Kustom untuk Training: {len(X_c_train)}, Validation: {len(X_c_val)}")
-
-# Jika ada data CSV asli, gabungkan ke training & validation
-if X_csv_train is not None:
-    X_train_list.append(X_csv_train)
-    y_train_list.append(y_csv_train)
-if X_csv_test is not None:
-    X_val_list.append(X_csv_test)
-    y_val_list.append(y_csv_test)
-
-# Validasi akhir ketersediaan data
-if len(X_train_list) == 0:
-    print("[ERROR] Tidak ada data latihan yang ditemukan sama sekali!")
-    print("        Silakan ambil screenshot dulu lewat 'realtime_hand_recognition.py'")
-    print("        atau letakkan file CSV dataset asli di folder ini.")
-    sys.exit(1)
-
-# Gabungkan semua data menggunakan numpy concatenate
-X_train = np.concatenate(X_train_list, axis=0)
-y_train = np.concatenate(y_train_list, axis=0)
-X_val = np.concatenate(X_val_list, axis=0) if len(X_val_list) > 0 else X_train
-y_val = np.concatenate(y_val_list, axis=0) if len(y_val_list) > 0 else y_train
-
-print(f"\n[INFO] Total Dataset Akhir:")
-print(f"       -> Gambar Latihan (Train): {X_train.shape[0]} sampel")
-print(f"       -> Gambar Validasi (Val) : {X_val.shape[0]} sampel")
-
-# Konversi label ke One-Hot Encoding
-y_train_onehot = to_categorical_numpy(y_train, num_classes=num_classes)
-y_val_onehot = to_categorical_numpy(y_val, num_classes=num_classes)
-
-# --- 6. Membuat Model CNN ---
-print("\n[INFO] Membangun arsitektur model CNN...")
-model = models.Sequential([
-    # Input Layer
-    layers.Input(shape=(28, 28, 1)),
-    
-    # Data Augmentation Layers (Hanya aktif selama training)
-    layers.RandomRotation(factor=0.08, fill_mode='constant', fill_value=0.0),
-    layers.RandomTranslation(height_factor=0.08, width_factor=0.08, fill_mode='constant', fill_value=0.0),
-    layers.RandomZoom(height_factor=0.08, fill_mode='constant', fill_value=0.0),
-    
-    # CNN Layers
-    layers.Conv2D(32, (3, 3), activation='relu'),
-    layers.MaxPooling2D((2, 2)),
-    layers.Conv2D(64, (3, 3), activation='relu'),
-    layers.MaxPooling2D((2, 2)),
-    layers.Flatten(),
-    layers.Dense(128, activation='relu'),
-    layers.Dropout(0.5),  # Dropout untuk mencegah overfitting
-    layers.Dense(num_classes, activation='softmax')
-])
-
-model.compile(
-    optimizer='adam',
-    loss='categorical_crossentropy',
-    metrics=['accuracy']
-)
-
-# Tampilkan ringkasan model
-model.summary()
-
-# --- 7. Melatih Model ---
-epochs = 35
-batch_size = 32
-
-print(f"\n[INFO] Memulai training model selama {epochs} epochs...")
-try:
-    history = model.fit(
-        X_train, y_train_onehot,
-        epochs=epochs,
-        batch_size=batch_size,
-        validation_data=(X_val, y_val_onehot)
+    inputs = layers.Input(shape=(IMG_SIZE, IMG_SIZE, 1))
+    x = conv_block(inputs, 32, 0.2)
+    x = conv_block(x, 64, 0.3)
+    x = layers.GlobalAveragePooling2D()(x)
+    x = layers.Dense(128, use_bias=False, kernel_regularizer=regularizers.l2(1e-4))(x)
+    x = layers.BatchNormalization()(x)
+    x = layers.Activation("relu")(x)
+    x = layers.Dropout(0.45)(x)
+    outputs = layers.Dense(num_classes, activation="softmax")(x)
+    model = models.Model(inputs=inputs, outputs=outputs)
+    model.compile(
+        optimizer=optimizers.Adam(learning_rate=5e-4),
+        loss=keras.losses.CategoricalCrossentropy(label_smoothing=0.08),
+        metrics=["accuracy"],
     )
-    print("[OK] Pelatihan model selesai.")
-except Exception as e:
-    print(f"[ERROR] Terjadi kegagalan saat melatih model: {e}")
-    sys.exit(1)
+    return model
 
-# --- 8. Evaluasi Model ---
-os.makedirs(evaluation_dir, exist_ok=True)
 
-print("\n[INFO] Menjalankan evaluasi model...")
-train_eval = evaluate_model(model, X_train, y_train, "Training Set")
-val_eval = evaluate_model(model, X_val, y_val, "Validation Set")
+def main():
+    global bad_files
+    os.makedirs(evaluation_dir, exist_ok=True)
 
-confusion_matrix_path = os.path.join(evaluation_dir, 'confusion_matrix.png')
-history_plot_path = os.path.join(evaluation_dir, 'training_history.png')
-report_path = os.path.join(evaluation_dir, 'evaluation_report.txt')
+    print("[INFO] Mengaudit kualitas dataset...")
+    audit_summary = audit_dataset(dataset_dir, alphabet, IMG_SIZE)
+    audit_path = os.path.join(evaluation_dir, "dataset_audit.txt")
+    save_audit_report(audit_summary, audit_path)
+    print(
+        f"[OK] Audit: {audit_summary['bad_images']} bermasalah "
+        f"dari {audit_summary['total_images']} gambar -> {audit_path}"
+    )
+    bad_files = {(b["char"], b["file"]) for b in audit_summary["bad_files"]}
 
-save_confusion_matrix_plot(val_eval['cm'], val_eval['active_labels'], confusion_matrix_path)
-save_training_history_plot(history, history_plot_path)
-save_evaluation_report(train_eval, val_eval, history, report_path)
+    X_custom, y_custom = load_custom_dataset()
+    if X_custom is None or len(X_custom) == 0:
+        print("[ERROR] Tidak ada data latihan yang ditemukan di folder dataset/!")
+        print("        Kumpulkan dulu foto isyarat lewat aplikasi (mode 'Latih Data' di app.py).")
+        sys.exit(1)
 
-print(f"\n[OK] Hasil evaluasi disimpan:")
-print(f"     - {report_path}")
-print(f"     - {confusion_matrix_path}")
-print(f"     - {history_plot_path}")
+    X_train, X_val, y_train, y_val = train_test_split_numpy(X_custom, y_custom, test_size=0.2)
+    print(f"[INFO] Data untuk Training: {len(X_train)}, Validation: {len(X_val)}")
+    print(f"       Train: {X_train.shape[0]} sampel | Val: {X_val.shape[0]} sampel")
 
-# --- 9. Menyimpan Model ---
-try:
-    print(f"\n[INFO] Menyimpan model baru ke '{model_output_path}'...")
-    model.save(model_output_path)
-    print(f"[OK] Model baru berhasil disimpan! Sekarang Anda bisa langsung menggunakan")
-    print(f"     'app.py' dengan model baru ini.")
-except Exception as e:
-    print(f"[ERROR] Gagal menyimpan file model: {e}")
+    y_train_onehot = to_categorical_numpy(y_train, num_classes=num_classes)
+    y_val_onehot = to_categorical_numpy(y_val, num_classes=num_classes)
 
-print("\n" + "="*70)
-print("[OK] Selesai.")
-print("="*70 + "\n")
+    print("\n[INFO] Membangun arsitektur model CNN (input 64x64)...")
+    model = build_cnn_model()
+    model.summary()
+
+    epochs = 60
+    batch_size = 32
+    best_weights_path = os.path.join(evaluation_dir, "best_model.weights.h5")
+
+    training_callbacks = [
+        callbacks.EarlyStopping(
+            monitor="val_accuracy",
+            mode="max",
+            patience=15,
+            restore_best_weights=True,
+            verbose=1,
+        ),
+        callbacks.ReduceLROnPlateau(
+            monitor="val_accuracy",
+            mode="max",
+            factor=0.5,
+            patience=5,
+            min_lr=1e-5,
+            verbose=1,
+        ),
+        callbacks.ModelCheckpoint(
+            best_weights_path,
+            monitor="val_accuracy",
+            mode="max",
+            save_best_only=True,
+            save_weights_only=True,
+            verbose=0,
+        ),
+    ]
+
+    train_ds = SignBatchDataset(X_train, y_train_onehot, batch_size, augment=True)
+    val_ds = SignBatchDataset(X_val, y_val_onehot, batch_size, augment=False)
+
+    print(f"\n[INFO] Memulai training model maksimal {epochs} epochs (early stopping aktif)...")
+    try:
+        history = model.fit(
+            train_ds,
+            epochs=epochs,
+            validation_data=val_ds,
+            callbacks=training_callbacks,
+        )
+        print("[OK] Pelatihan model selesai.")
+    except Exception as e:
+        print(f"[ERROR] Terjadi kegagalan saat melatih model: {e}")
+        sys.exit(1)
+
+    print("\n[INFO] Menjalankan evaluasi model (gambar tanpa augmentasi)...")
+    train_eval = evaluate_model(model, X_train, y_train, "Training Set")
+    val_eval = evaluate_model(model, X_val, y_val, "Validation Set")
+
+    confusion_matrix_path = os.path.join(evaluation_dir, "confusion_matrix.png")
+    history_plot_path = os.path.join(evaluation_dir, "training_history.png")
+    report_path = os.path.join(evaluation_dir, "evaluation_report.txt")
+
+    save_confusion_matrix_plot(val_eval["cm"], val_eval["active_labels"], confusion_matrix_path)
+    save_training_history_plot(history, history_plot_path)
+    save_evaluation_report(train_eval, val_eval, history, report_path)
+
+    print(f"\n[OK] Hasil evaluasi disimpan:")
+    print(f"     - {report_path}")
+    print(f"     - {confusion_matrix_path}")
+    print(f"     - {history_plot_path}")
+
+    try:
+        os.makedirs(models_dir, exist_ok=True)
+        print(f"\n[INFO] Menyimpan model baru ke '{model_output_path}'...")
+        model.save(model_output_path)
+        print("[OK] Model baru berhasil disimpan. Jalankan app.py untuk pakai model ini.")
+    except Exception as e:
+        print(f"[ERROR] Gagal menyimpan file model: {e}")
+
+    print("\n" + "=" * 70)
+    print("[OK] Selesai.")
+    print("=" * 70 + "\n")
+
+
+if __name__ == "__main__":
+    main()

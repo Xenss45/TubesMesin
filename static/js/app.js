@@ -1,153 +1,194 @@
-// GLOBAL STATE
+// ============================================================
+// BICARAISYARAT - FRONTEND LOGIC (Revamp)
+// ============================================================
+
 const alphabet = "0123456789abcdefghijklmnopqrstuvwxyz";
-let activeLetterIdx = 10; // Default: 'a'
+const ROI_BOX_SIZE = 300; // HARUS sama dengan ROI_BOX_SIZE di app.py
+
+// --- Sensitivitas (preset) ---
+const CONFIDENCE_HIGH_PCT = 60;   // hijau / deteksi "mantap"
+const CONFIDENCE_MEDIUM_PCT = 45;
+
+const SENSITIVITY = {
+    fast:     { hold: 800,  conf: 0.55, label: "Cepat" },
+    normal:   { hold: 900,  conf: 0.60, label: "Normal" },
+    accurate: { hold: 1700, conf: 0.72, label: "Akurat" },
+};
+let holdDurationMs = SENSITIVITY.normal.hold;
+let minConfidence = SENSITIVITY.normal.conf;
+
+const PREDICTION_TICK_MS = 50;        // jadwalkan prediksi; antre jika request masih jalan
+const ROI_CAPTURE_SIZE = 192;         // crop ROI untuk upload
+const CAPTURE_MAX_WIDTH = 480;        // untuk simpan dataset (frame penuh)
+const JPEG_QUALITY = 0.52;
+const SMOOTH_BUFFER_SIZE = 4;         // voting huruf ke kalimat
+const DISPLAY_BUFFER_SIZE = 5;        // smoothing tampilan huruf di UI
+const DISPLAY_HOLD_MS = 550;          // tahan huruf terakhir (anti flicker ke "?")
+const REPEAT_COOLDOWN_MS = 650;   // jeda sebelum huruf yang sama bisa diketik lagi
+const WORD_SUGGESTION_DEBOUNCE_MS = 400;
+
+// --- State umum ---
+let activeLetterIdx = 10; // 'a'
 let datasetCounts = {};
 let isPredicting = false;
+let predictPending = false;
+let predictRequestId = 0;
+let lastServerPreviewAt = 0;
 let lastPrediction = null;
+let displayBuffer = [];
+let lastGoodDetectionAt = 0;
+let smoothedDisplayConf = 0;
+let currentMode = "translate";
 
-// SENTENCE BUILDER STATE
+// --- State penyusun kata ---
 let currentWord = "";
 let accumulatedWords = [];
+let predictionBuffer = [];       // {char, conf}
 let stableLetter = null;
-let stableLetterSince = null;
-const HOLD_DURATION_MS = 1500;
-const MIN_CONFIDENCE = 0.65;
-const PREDICTION_INTERVAL_MS = 120;
+let stableSince = 0;
+let armed = true;                // siap commit huruf saat hold tercapai
+let cooldownUntil = 0;
 let isRefining = false;
-let hasTypedCurrentSign = false;
 let lastDetectedLanguage = "id";
 
-// WORD PREDICTION STATE
+// --- State prediksi kata ---
 let wordSuggestions = [];
 let isFetchingSuggestions = false;
 let wordSuggestionDebounce = null;
 let lastSuggestionRequest = "";
-let lastScheduledPartial = "";
-const WORD_SUGGESTION_DEBOUNCE_MS = 450;
+let lastScheduledKey = "";
 
-// DOM ELEMENTS
+// --- DOM: kamera ---
 const video = document.getElementById('webcam');
 const overlay = document.getElementById('overlay');
 const ctx = overlay.getContext('2d');
-const selectChar = document.getElementById('char-select');
-const btnPrev = document.getElementById('btn-prev-char');
-const btnNext = document.getElementById('btn-next-char');
-const btnCapture = document.getElementById('btn-capture');
 const loader = document.getElementById('webcam-loader');
-const predictedLetter = document.getElementById('predicted-letter');
+const cnnPreview = document.getElementById('cnn-input-preview');
+const cnnPreviewCtx = cnnPreview?.getContext('2d', { willReadFrequently: true });
+const cameraStatus = document.getElementById('camera-status');
+
+// --- DOM: deteksi ---
+const detectedLetter = document.getElementById('detected-letter');
+const detectionWrap = document.getElementById('detection-letter-wrap');
 const confidencePercent = document.getElementById('confidence-percentage');
 const confidenceProgress = document.getElementById('confidence-progress');
-const cnnPreview = document.getElementById('cnn-input-preview');
-const totalSamplesBadge = document.getElementById('total-samples');
-const statsGrid = document.getElementById('stats-grid');
+const top3List = document.getElementById('top3-list');
 
-// DOM Sentence Builder
+// --- DOM: tabs/panel ---
+const tabTranslate = document.getElementById('tab-translate');
+const tabCollect = document.getElementById('tab-collect');
+const panelTranslate = document.getElementById('panel-translate');
+const panelCollect = document.getElementById('panel-collect');
+
+// --- DOM: composer ---
 const activeCharDisplay = document.getElementById('active-char-display');
 const currentWordField = document.getElementById('current-word-field');
 const rawTextField = document.getElementById('raw-text-field');
+const composerPreview = document.getElementById('composer-preview');
 const refinedSentenceField = document.getElementById('refined-sentence-field');
 const thoughtList = document.getElementById('thought-list');
 const aiSource = document.getElementById('ai-source');
 const defaultAiSourceStatus = aiSource?.dataset.defaultStatus || "Sistem Lokal";
-const progressCircle = document.querySelector('.progress-ring__circle');
 
-// Sentence Builder Buttons
+function updateAiSourceChip(status, langLabel = "") {
+    if (!aiSource || !status) return;
+    const suffix = langLabel ? ` (${langLabel})` : "";
+    aiSource.innerHTML = `<i class="fa-solid fa-microchip"></i> ${status}${suffix}`;
+}
+const progressCircle = document.querySelector('.progress-ring__circle');
+const holdLabel = document.getElementById('hold-progress-label');
+const wordSuggestionsEl = document.getElementById('word-suggestions');
+
+// --- DOM: tombol composer ---
 const btnSpace = document.getElementById('btn-space');
 const btnBackspace = document.getElementById('btn-backspace');
 const btnClearSentence = document.getElementById('btn-clear-sentence');
 const btnRefine = document.getElementById('btn-refine');
 const btnSpeak = document.getElementById('btn-speak');
 const languageSelect = document.getElementById('language-select');
-const holdProgressBar = document.getElementById('hold-progress-bar');
-const holdProgressLabel = document.getElementById('hold-progress-label');
-const wordSuggestionsEl = document.getElementById('word-suggestions');
-const composerPreview = document.getElementById('composer-preview');
+const sensitivitySelect = document.getElementById('sensitivity-select');
 
-// Canvas tersembunyi untuk grab frame gambar mentah
+// --- DOM: collect ---
+const selectChar = document.getElementById('char-select');
+const targetBig = document.getElementById('target-big');
+const btnPrev = document.getElementById('btn-prev-char');
+const btnNext = document.getElementById('btn-next-char');
+const btnCapture = document.getElementById('btn-capture');
+const totalSamplesBadge = document.getElementById('total-samples');
+const statsGrid = document.getElementById('stats-grid');
+
+// --- Canvas tersembunyi untuk grab frame ---
 const grabCanvas = document.createElement('canvas');
 const grabCtx = grabCanvas.getContext('2d');
 let videoFrameWidth = 640;
 let videoFrameHeight = 480;
 
-// --- 1. INISIALISASI ---
+// ============================================================
+// 1. INISIALISASI
+// ============================================================
 
-// Populasi Dropdown target karakter
 function populateDropdown() {
     selectChar.innerHTML = "";
-    for (let char of alphabet) {
+    for (const char of alphabet) {
         const option = document.createElement('option');
         option.value = char;
         option.textContent = char.toUpperCase();
         selectChar.appendChild(option);
     }
     selectChar.value = alphabet[activeLetterIdx];
+    updateTargetDisplay();
 }
 
-function getRoiCoords(w, h, boxSize = 240) {
-    const x_min = Math.max(0, Math.floor(w * 0.55 - boxSize * 0.5));
-    const y_min = Math.max(0, Math.floor(h * 0.5 - boxSize * 0.5));
-    const x_max = Math.min(w, x_min + boxSize);
-    const y_max = Math.min(h, y_min + boxSize);
-    return {
-        x_min,
-        y_min,
-        box_size: Math.min(boxSize, x_max - x_min, y_max - y_min)
-    };
+function getRoiCoords(w, h, boxSize = ROI_BOX_SIZE) {
+    const box = Math.min(boxSize, w, h);
+    const x_min = Math.max(0, Math.floor(w * 0.5 - box * 0.5));
+    const y_min = Math.max(0, Math.floor(h * 0.5 - box * 0.5));
+    return { x_min, y_min, box_size: box };
 }
 
 function syncWebcamLayout() {
     const vw = video.videoWidth;
     const vh = video.videoHeight;
     if (!vw || !vh) return;
-
     videoFrameWidth = vw;
     videoFrameHeight = vh;
     overlay.width = vw;
     overlay.height = vh;
     grabCanvas.width = vw;
     grabCanvas.height = vh;
-
     const stage = document.getElementById('webcam-stage');
-    if (stage) {
-        stage.style.aspectRatio = `${vw} / ${vh}`;
-    }
+    if (stage) stage.style.aspectRatio = `${vw} / ${vh}`;
 }
 
-// Buka webcam
 async function setupWebcam() {
     try {
         loader.style.display = 'flex';
         const stream = await navigator.mediaDevices.getUserMedia({
-            video: {
-                width: { ideal: 640 },
-                height: { ideal: 480 },
-                facingMode: 'user'
-            },
+            video: { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: 'user' },
             audio: false
         });
         video.srcObject = stream;
-        
         return new Promise((resolve) => {
             video.onloadedmetadata = () => {
                 syncWebcamLayout();
                 loader.style.display = 'none';
+                if (cameraStatus) cameraStatus.classList.add('online');
                 resolve();
             };
         });
     } catch (err) {
         console.error("Error webcam:", err);
+        if (cameraStatus) cameraStatus.classList.add('offline');
         loader.innerHTML = `
-            <i class="fa-solid fa-triangle-exclamation" style="font-size: 32px; color: #ef4444;"></i>
-            <p style="color: #ef4444; font-weight: bold; margin-top: 10px;">Gagal Mengakses Kamera</p>
-            <p style="font-size: 12px; color: #9ca3af; text-align: center; max-width: 250px; margin-top: 5px;">
-                Pastikan izin kamera browser aktif dan tidak ada aplikasi lain yang menggunakan kamera.
-            </p>
-        `;
+            <i class="fa-solid fa-triangle-exclamation" style="font-size:32px;color:#ef4444;"></i>
+            <p style="color:#ef4444;font-weight:bold;">Gagal Mengakses Kamera</p>
+            <p style="font-size:12px;color:#94a3b8;text-align:center;max-width:260px;">
+                Pastikan izin kamera aktif dan tidak dipakai aplikasi lain.
+            </p>`;
         throw err;
     }
 }
 
-// Fetch total foto terkumpul saat pertama kali dimuat
 async function fetchDatasetCounts() {
     try {
         const response = await fetch('/dataset_counts');
@@ -160,64 +201,187 @@ async function fetchDatasetCounts() {
     }
 }
 
-// Update UI Grid Statistik
 function updateStatsUI() {
     statsGrid.innerHTML = "";
-    let totalSamples = 0;
-    
-    for (let char of alphabet) {
+    let total = 0;
+    for (const char of alphabet) {
         const count = datasetCounts[char] || 0;
-        totalSamples += count;
-        
+        total += count;
         const box = document.createElement('div');
         box.className = `stat-box ${count > 0 ? 'has-data' : ''} ${alphabet[activeLetterIdx] === char ? 'active' : ''}`;
         box.id = `stat-box-${char}`;
         box.onclick = () => {
             activeLetterIdx = alphabet.indexOf(char);
             selectChar.value = char;
+            updateTargetDisplay();
             updateActiveHighlight();
         };
-        
-        box.innerHTML = `
-            <span class="stat-letter">${char}</span>
-            <span class="stat-count">${count}</span>
-        `;
+        box.innerHTML = `<span class="stat-letter">${char}</span><span class="stat-count">${count}</span>`;
         statsGrid.appendChild(box);
     }
-    
-    totalSamplesBadge.textContent = `Total: ${totalSamples} Foto`;
+    if (totalSamplesBadge) totalSamplesBadge.textContent = `Total: ${total}`;
 }
 
-// Update status highlight target aktif tanpa merender ulang seluruh grid
 function updateActiveHighlight() {
-    document.querySelectorAll('.stat-box').forEach(box => {
-        box.classList.remove('active');
-    });
+    document.querySelectorAll('.stat-box').forEach(b => b.classList.remove('active'));
     const activeBox = document.getElementById(`stat-box-${alphabet[activeLetterIdx]}`);
-    if (activeBox) {
-        activeBox.classList.add('active');
-    }
+    if (activeBox) activeBox.classList.add('active');
 }
 
-// --- 2. LOGIKA UTAMA (PREDIKSI & DATASET) ---
+function updateTargetDisplay() {
+    if (targetBig) targetBig.textContent = alphabet[activeLetterIdx].toUpperCase();
+}
+
+// ============================================================
+// 2. MODE / TAB
+// ============================================================
+
+function switchMode(mode) {
+    currentMode = mode;
+    const isTranslate = mode === "translate";
+    panelTranslate.classList.toggle('hidden', !isTranslate);
+    panelCollect.classList.toggle('hidden', isTranslate);
+    tabTranslate.classList.toggle('active', isTranslate);
+    tabCollect.classList.toggle('active', !isTranslate);
+    if (!isTranslate) updateStatsUI();
+}
+
+tabTranslate.addEventListener('click', () => switchMode('translate'));
+tabCollect.addEventListener('click', () => switchMode('collect'));
+
+// ============================================================
+// 3. PREDIKSI & SMOOTHING
+// ============================================================
 
 function resetStableState() {
+    predictionBuffer = [];
+    displayBuffer = [];
+    lastGoodDetectionAt = 0;
+    smoothedDisplayConf = 0;
     stableLetter = null;
-    stableLetterSince = null;
-    hasTypedCurrentSign = false;
+    stableSince = 0;
+    armed = true;
+    cooldownUntil = 0;
+}
+
+function pushDisplaySample(result) {
+    if (!isValidPrediction(result)) return;
+    displayBuffer.push({ char: result.char, conf: result.confidence || 0 });
+    if (displayBuffer.length > DISPLAY_BUFFER_SIZE) displayBuffer.shift();
+    lastGoodDetectionAt = Date.now();
+}
+
+function getSmoothedDisplay() {
+    const handStale = Date.now() - lastGoodDetectionAt > DISPLAY_HOLD_MS;
+    if (handStale || displayBuffer.length === 0) {
+        return { char: '?', confidence: 0, hand_detected: false };
+    }
+
+    const tally = {};
+    const confSum = {};
+    for (const s of displayBuffer) {
+        tally[s.char] = (tally[s.char] || 0) + 1;
+        confSum[s.char] = (confSum[s.char] || 0) + s.conf;
+    }
+    let best = null;
+    let bestCount = 0;
+    for (const ch in tally) {
+        if (tally[ch] > bestCount) {
+            best = ch;
+            bestCount = tally[ch];
+        }
+    }
+    if (!best) {
+        return { char: '?', confidence: 0, hand_detected: false };
+    }
+
+    const needed = Math.max(2, Math.ceil(displayBuffer.length * 0.45));
+    if (bestCount < needed) {
+        const last = displayBuffer[displayBuffer.length - 1];
+        return {
+            char: last.char,
+            confidence: last.conf,
+            hand_detected: true,
+        };
+    }
+
+    return {
+        char: best,
+        confidence: confSum[best] / tally[best],
+        hand_detected: true,
+    };
+}
+
+// Voting: huruf paling sering muncul di buffer, dengan rata-rata confidence cukup
+function computeSmoothedLetter() {
+    if (predictionBuffer.length < Math.ceil(SMOOTH_BUFFER_SIZE * 0.6)) return null;
+    const tally = {};
+    const confSum = {};
+    for (const p of predictionBuffer) {
+        if (!p.char) continue;
+        tally[p.char] = (tally[p.char] || 0) + 1;
+        confSum[p.char] = (confSum[p.char] || 0) + p.conf;
+    }
+    let best = null, bestCount = 0;
+    for (const ch in tally) {
+        if (tally[ch] > bestCount) { best = ch; bestCount = tally[ch]; }
+    }
+    if (!best) return null;
+    const needed = Math.ceil(predictionBuffer.length * 0.5);
+    const avgConf = confSum[best] / tally[best];
+    if (bestCount >= needed && avgConf >= minConfidence) return best;
+    return null;
 }
 
 function isValidPrediction(result) {
-    return result.hand_detected !== false
-        && result.char
-        && result.char !== "?"
-        && result.confidence >= MIN_CONFIDENCE;
+    return result.hand_detected !== false && result.char && result.char !== "?";
+}
+
+function pushToBuffer(result) {
+    const valid = isValidPrediction(result) && result.confidence >= (minConfidence - 0.1);
+    predictionBuffer.push({ char: valid ? result.char : null, conf: result.confidence || 0 });
+    if (predictionBuffer.length > SMOOTH_BUFFER_SIZE) predictionBuffer.shift();
+}
+
+function processStableLetter() {
+    const now = Date.now();
+    const smoothed = computeSmoothedLetter();
+
+    if (!smoothed) {
+        stableLetter = null;
+        return;
+    }
+
+    // Huruf berubah -> mulai hitung hold baru
+    if (smoothed !== stableLetter) {
+        stableLetter = smoothed;
+        stableSince = now;
+        armed = now >= cooldownUntil;
+        return;
+    }
+
+    // Masih dalam cooldown (baru saja commit huruf yang sama) -> tunggu lalu re-arm
+    if (!armed) {
+        if (now >= cooldownUntil) {
+            armed = true;
+            stableSince = now; // wajib tahan lagi untuk huruf berulang
+        }
+        return;
+    }
+
+    // Hold tercapai -> commit huruf
+    if (now - stableSince >= holdDurationMs) {
+        currentWord += stableLetter;
+        armed = false;
+        cooldownUntil = now + REPEAT_COOLDOWN_MS;
+        triggerWordPulse();
+        scheduleWordSuggestionsFetch();
+    }
 }
 
 function getHoldProgressPercent() {
-    if (!stableLetter || !stableLetterSince || hasTypedCurrentSign) return 0;
-    const elapsed = Date.now() - stableLetterSince;
-    return Math.min(100, (elapsed / HOLD_DURATION_MS) * 100);
+    if (!stableLetter || !armed) return 0;
+    return Math.min(100, ((Date.now() - stableSince) / holdDurationMs) * 100);
 }
 
 function triggerWordPulse() {
@@ -226,484 +390,368 @@ function triggerWordPulse() {
     setTimeout(() => currentWordField.classList.remove('pulse-effect'), 300);
 }
 
-function processStableLetter(result) {
-    const now = Date.now();
-
-    if (!isValidPrediction(result)) {
-        resetStableState();
-        return;
-    }
-
-    if (result.char === stableLetter) {
-        if (!hasTypedCurrentSign && stableLetterSince && (now - stableLetterSince) >= HOLD_DURATION_MS) {
-            currentWord += stableLetter;
-            hasTypedCurrentSign = true;
-            triggerWordPulse();
-        }
-        return;
-    }
-
-    stableLetter = result.char;
-    stableLetterSince = now;
-    hasTypedCurrentSign = false;
+function drawMirroredRegion(sx, sy, sw, sh, dw, dh) {
+    grabCtx.save();
+    grabCtx.scale(-1, 1);
+    grabCtx.drawImage(video, sx, sy, sw, sh, -dw, 0, dw, dh);
+    grabCtx.restore();
 }
 
-// Grab frame dan ubah ke format base64 (resolusi asli kamera, tanpa distorsi)
 function getFrameBase64() {
-    const w = video.videoWidth || videoFrameWidth;
-    const h = video.videoHeight || videoFrameHeight;
-    if (grabCanvas.width !== w || grabCanvas.height !== h) {
-        grabCanvas.width = w;
-        grabCanvas.height = h;
+    const vw = video.videoWidth || videoFrameWidth;
+    const vh = video.videoHeight || videoFrameHeight;
+    let tw = vw;
+    let th = vh;
+    if (vw > CAPTURE_MAX_WIDTH) {
+        tw = CAPTURE_MAX_WIDTH;
+        th = Math.max(1, Math.round(vh * (CAPTURE_MAX_WIDTH / vw)));
     }
-    grabCtx.drawImage(video, 0, 0, w, h);
-    return grabCanvas.toDataURL('image/jpeg', 0.85);
+    if (grabCanvas.width !== tw || grabCanvas.height !== th) {
+        grabCanvas.width = tw;
+        grabCanvas.height = th;
+    }
+    drawMirroredRegion(0, 0, vw, vh, tw, th);
+    return grabCanvas.toDataURL('image/jpeg', JPEG_QUALITY);
 }
 
-// Kirim frame ke server untuk deteksi/prediksi CNN
-async function runPrediction() {
-    if (isPredicting || video.paused || video.ended) return;
-    
+/** Gambar ROI ke canvas (mirror). */
+function captureRoiToCanvas() {
+    const vw = video.videoWidth || videoFrameWidth;
+    const vh = video.videoHeight || videoFrameHeight;
+    const { x_min, y_min, box_size } = getRoiCoords(vw, vh);
+    const out = ROI_CAPTURE_SIZE;
+    if (grabCanvas.width !== out || grabCanvas.height !== out) {
+        grabCanvas.width = out;
+        grabCanvas.height = out;
+    }
+    drawMirroredRegion(x_min, y_min, box_size, box_size, out, out);
+}
+
+function roiCanvasToBlob() {
+    return new Promise((resolve) => {
+        grabCanvas.toBlob((blob) => resolve(blob), 'image/jpeg', JPEG_QUALITY);
+    });
+}
+
+/** Placeholder hitam sampai preview segmented dari server tiba. */
+function drawLocalCnnPreview() {
+    if (!cnnPreviewCtx) return;
+    if (lastServerPreviewAt) return;
+    cnnPreviewCtx.fillStyle = '#05070d';
+    cnnPreviewCtx.fillRect(0, 0, cnnPreview.width, cnnPreview.height);
+}
+
+function drawServerCnnPreview(dataUrl) {
+    if (!cnnPreviewCtx || !dataUrl) return;
+    const img = new Image();
+    img.onload = () => {
+        cnnPreviewCtx.drawImage(img, 0, 0, cnnPreview.width, cnnPreview.height);
+        lastServerPreviewAt = Date.now();
+    };
+    img.src = dataUrl;
+}
+
+function localPreviewLoop() {
+    drawLocalCnnPreview();
+    requestAnimationFrame(localPreviewLoop);
+}
+
+function schedulePrediction() {
+    if (video.paused || video.ended) return;
+    captureRoiToCanvas();
+    predictPending = true;
+    if (!isPredicting) flushPrediction();
+}
+
+async function flushPrediction() {
+    if (!predictPending || isPredicting) return;
+    predictPending = false;
     isPredicting = true;
-    const dataUrl = getFrameBase64();
-    
+    const reqId = ++predictRequestId;
+
+    const blob = await roiCanvasToBlob();
+    if (!blob) {
+        isPredicting = false;
+        if (predictPending) flushPrediction();
+        return;
+    }
+
+    const form = new FormData();
+    form.append('image', blob, 'roi.jpg');
+    form.append('roi_only', '1');
+    form.append('skip_preview', '0');
+
     try {
-        const response = await fetch('/predict', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({
-                image: dataUrl
-            })
-        });
-        
-        if (response.ok) {
-            const result = await response.json();
-            if (!result.error) {
-                lastPrediction = {
-                    char: result.char,
-                    confidence: result.confidence,
-                    hand_detected: result.hand_detected !== false,
-                    x_min: result.x_min,
-                    y_min: result.y_min,
-                    x_max: result.x_max,
-                    y_max: result.y_max,
-                    timestamp: Date.now()
-                };
-                
-                if (result.mini_roi) {
-                    cnnPreview.src = result.mini_roi;
-                }
-                
-                updatePredictionUI(result.char, result.confidence, result.hand_detected);
-                processStableLetter(result);
-                updateSentenceBuilderUI();
-            }
+        const response = await fetch('/predict', { method: 'POST', body: form });
+        if (!response.ok) return;
+
+        const result = await response.json();
+        if (result.error) return;
+
+        if (result.mini_roi) drawServerCnnPreview(result.mini_roi);
+
+        pushDisplaySample(result);
+        const display = getSmoothedDisplay();
+        smoothedDisplayConf += (display.confidence - smoothedDisplayConf) * 0.35;
+
+        lastPrediction = {
+            char: display.char,
+            confidence: smoothedDisplayConf,
+            hand_detected: display.hand_detected,
+            box: getRoiCoords(overlay.width, overlay.height),
+            timestamp: Date.now()
+        };
+
+        updatePredictionUI(display);
+        renderTop3(result.top3 || []);
+
+        if (currentMode === 'translate') {
+            pushToBuffer(result);
+            processStableLetter();
         }
     } catch (err) {
-        console.error("Gagal melakukan prediksi:", err);
+        console.error('Gagal melakukan prediksi:', err);
     } finally {
         isPredicting = false;
+        if (predictPending) flushPrediction();
     }
 }
 
-// Update prediksi utama di panel HUD kanan
-function updatePredictionUI(char, confidence, handDetected = true) {
-    const percentage = Math.round(confidence * 100);
-    const wrapper = document.querySelector('.predicted-char-wrapper');
-    
+function predictionLoop() {
+    setInterval(schedulePrediction, PREDICTION_TICK_MS);
+}
+
+function updatePredictionUI(result) {
+    const handDetected = result.hand_detected !== false;
+    const char = result.char;
+    const pct = Math.round((result.confidence || 0) * 100);
+    const letterEl = detectedLetter;
+    if (letterEl && letterEl.textContent !== (handDetected && char && char !== '?' ? char : '?')) {
+        letterEl.style.transform = 'scale(0.92)';
+        requestAnimationFrame(() => { letterEl.style.transform = 'scale(1)'; });
+    }
+
+    detectionWrap.classList.remove('high', 'medium');
     if (handDetected && char && char !== "?") {
-        predictedLetter.textContent = char;
-        confidencePercent.textContent = `${percentage}%`;
-        confidenceProgress.style.width = `${percentage}%`;
-        
-        // Atur style berdasarkan confidence
-        wrapper.classList.remove('high-confidence', 'medium-confidence');
-        if (percentage > 60) {
-            wrapper.classList.add('high-confidence');
-            confidenceProgress.style.background = 'var(--accent-green)';
-        } else if (percentage > 30) {
-            wrapper.classList.add('medium-confidence');
-            confidenceProgress.style.background = 'var(--accent-orange)';
+        detectedLetter.textContent = char;
+        confidencePercent.textContent = `${pct}%`;
+        confidenceProgress.style.width = `${pct}%`;
+        if (pct >= CONFIDENCE_HIGH_PCT) {
+            detectionWrap.classList.add('high');
+            confidenceProgress.style.background = 'var(--green)';
+        } else if (pct >= CONFIDENCE_MEDIUM_PCT) {
+            detectionWrap.classList.add('medium');
+            confidenceProgress.style.background = 'var(--orange)';
         } else {
-            confidenceProgress.style.background = 'var(--accent-blue)';
+            confidenceProgress.style.background = 'linear-gradient(90deg, var(--primary), var(--cyan))';
         }
     } else {
-        predictedLetter.textContent = "?";
+        detectedLetter.textContent = "?";
         confidencePercent.textContent = "0%";
         confidenceProgress.style.width = "0%";
-        wrapper.classList.remove('high-confidence', 'medium-confidence');
     }
 }
 
-// Kirim perintah simpan dataset ke Python backend
+function renderTop3(top3) {
+    if (!top3List) return;
+    top3List.innerHTML = "";
+    top3.forEach((item, i) => {
+        const chip = document.createElement('span');
+        chip.className = "top3-chip";
+        chip.innerHTML = `<strong>${item.char}</strong> ${Math.round(item.confidence * 100)}%`;
+        top3List.appendChild(chip);
+    });
+}
+
+// ============================================================
+// 4. SIMPAN DATASET
+// ============================================================
+
 async function captureAndSaveDataset() {
     const targetChar = alphabet[activeLetterIdx];
     const dataUrl = getFrameBase64();
-    
     btnCapture.disabled = true;
+    const original = btnCapture.innerHTML;
     btnCapture.innerHTML = `<i class="fa-solid fa-circle-notch fa-spin"></i> Menyimpan...`;
-    
     try {
         const response = await fetch('/save_dataset', {
             method: 'POST',
-            headers: {
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({
-                image: dataUrl,
-                char: targetChar
-            })
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ image: dataUrl, char: targetChar })
         });
-        
         if (response.ok) {
             const result = await response.json();
             if (result.status === "ok") {
-                // Update counter dataset
                 datasetCounts[targetChar] = result.count;
                 updateStatsUI();
-                
-                // Beri efek notifikasi visual pada tombol
-                btnCapture.style.background = 'var(--accent-green)';
-                btnCapture.style.color = '#fff';
+                updateActiveHighlight();
                 btnCapture.innerHTML = `<i class="fa-solid fa-check"></i> Tersimpan! (${result.count})`;
             }
         }
     } catch (err) {
         console.error("Gagal menyimpan data latih:", err);
+        btnCapture.innerHTML = `<i class="fa-solid fa-xmark"></i> Gagal`;
     } finally {
-        setTimeout(() => {
-            btnCapture.disabled = false;
-            btnCapture.style.background = 'var(--accent-cyan)';
-            btnCapture.style.color = '#fff';
-            btnCapture.innerHTML = `<i class="fa-solid fa-camera-retro"></i> Simpan Gambar (Shortcut: S)`;
-        }, 1500);
+        setTimeout(() => { btnCapture.disabled = false; btnCapture.innerHTML = original; }, 1200);
     }
 }
 
-// --- 3. GRAPHICS OVERLAY DRAW LOOP ---
+// ============================================================
+// 5. OVERLAY (ROI BOX)
+// ============================================================
 
-// Render loop HUD overlay (kotak ROI tetap dan hasil prediksi)
 function renderHUDLoop() {
     const fw = overlay.width || videoFrameWidth;
     const fh = overlay.height || videoFrameHeight;
-    if (overlay.width !== fw || overlay.height !== fh) {
-        overlay.width = fw;
-        overlay.height = fh;
-    }
     ctx.clearRect(0, 0, fw, fh);
 
     const { x_min, y_min, box_size } = getRoiCoords(fw, fh);
-    
-    let boxColor = "#3b82f6"; // Biru default
-    let predText = "";
-    
-    if (lastPrediction && (Date.now() - lastPrediction.timestamp < 1000)) {
+
+    let boxColor = "#6366f1";
+    if (lastPrediction && (Date.now() - lastPrediction.timestamp < DISPLAY_HOLD_MS + 400)) {
         if (!lastPrediction.hand_detected) {
             boxColor = "#64748b";
-            predText = "Tidak ada tangan terdeteksi";
         } else {
-            const percentage = Math.round(lastPrediction.confidence * 100);
-            if (percentage > 60) {
-                boxColor = "#10b981";
-            } else if (percentage > 30) {
-                boxColor = "#f59e0b";
-            }
-
-            if (lastPrediction.char && lastPrediction.char !== "?") {
-                predText = `Prediksi: ${lastPrediction.char.toUpperCase()} (${percentage}%)`;
-            }
+            const pct = Math.round(lastPrediction.confidence * 100);
+            if (pct >= CONFIDENCE_HIGH_PCT) boxColor = "#10b981";
+            else if (pct >= CONFIDENCE_MEDIUM_PCT) boxColor = "#f59e0b";
         }
     }
-    
-    // Gambar kotak ROI tetap
+
     ctx.strokeStyle = boxColor;
-    ctx.lineWidth = 3;
-    ctx.lineJoin = "round";
+    ctx.lineWidth = 2.5;
+    ctx.setLineDash([8, 6]);
     ctx.strokeRect(x_min, y_min, box_size, box_size);
-    
-    // Gambar sudut dekoratif HUD untuk estetika premium
-    const len = 20;
-    ctx.strokeStyle = boxColor;
+    ctx.setLineDash([]);
+
+    const len = 24;
     ctx.lineWidth = 5;
-    
-    // Pojok Kiri Atas
-    ctx.beginPath();
-    ctx.moveTo(x_min - 2, y_min - 2 + len);
-    ctx.lineTo(x_min - 2, y_min - 2);
-    ctx.lineTo(x_min - 2 + len, y_min - 2);
-    ctx.stroke();
-    
-    // Pojok Kanan Atas
-    ctx.beginPath();
-    ctx.moveTo(x_min + box_size + 2 - len, y_min - 2);
-    ctx.lineTo(x_min + box_size + 2, y_min - 2);
-    ctx.lineTo(x_min + box_size + 2, y_min - 2 + len);
-    ctx.stroke();
-    
-    // Pojok Kiri Bawah
-    ctx.beginPath();
-    ctx.moveTo(x_min - 2, y_min + box_size + 2 - len);
-    ctx.lineTo(x_min - 2, y_min + box_size + 2);
-    ctx.lineTo(x_min - 2 + len, y_min + box_size + 2);
-    ctx.stroke();
-    
-    // Pojok Kanan Bawah
-    ctx.beginPath();
-    ctx.moveTo(x_min + box_size + 2 - len, y_min + box_size + 2);
-    ctx.lineTo(x_min + box_size + 2, y_min + box_size + 2);
-    ctx.lineTo(x_min + box_size + 2, y_min + box_size + 2 - len);
-    ctx.stroke();
-    
-    // Gambar teks prediksi di atas kotak
-    if (predText) {
-        ctx.fillStyle = boxColor;
-        ctx.font = "bold 16px 'Outfit', sans-serif";
-        
-        // Gambar background teks kecil untuk legibilitas
-        const textWidth = ctx.measureText(predText).width;
-        ctx.fillStyle = "rgba(0, 0, 0, 0.7)";
-        ctx.fillRect(x_min, y_min - 30, textWidth + 16, 24);
-        
-        ctx.fillStyle = boxColor;
-        ctx.save();
-        // Karena canvas overlay di-mirror via CSS transform: scaleX(-1),
-        // kita perlu membalik sumbu X sebelum menggambar teks agar teks tidak terbalik.
-        ctx.translate(x_min + textWidth + 8, 0);
-        ctx.scale(-1, 1);
-        ctx.fillText(predText, 0, y_min - 13);
-        ctx.restore();
+    ctx.lineCap = "round";
+    const corners = [
+        [[x_min, y_min + len], [x_min, y_min], [x_min + len, y_min]],
+        [[x_min + box_size - len, y_min], [x_min + box_size, y_min], [x_min + box_size, y_min + len]],
+        [[x_min, y_min + box_size - len], [x_min, y_min + box_size], [x_min + len, y_min + box_size]],
+        [[x_min + box_size - len, y_min + box_size], [x_min + box_size, y_min + box_size], [x_min + box_size, y_min + box_size - len]],
+    ];
+    for (const c of corners) {
+        ctx.beginPath();
+        ctx.moveTo(c[0][0], c[0][1]);
+        ctx.lineTo(c[1][0], c[1][1]);
+        ctx.lineTo(c[2][0], c[2][1]);
+        ctx.stroke();
     }
-    
+
     requestAnimationFrame(renderHUDLoop);
 }
 
-// --- 4. EVENT LISTENERS & SHORTCUTS ---
+// ============================================================
+// 6. PENYUSUN KALIMAT (UI)
+// ============================================================
 
-// Ganti huruf target
-selectChar.addEventListener('change', () => {
-    activeLetterIdx = alphabet.indexOf(selectChar.value);
-    updateActiveHighlight();
-});
-
-btnPrev.addEventListener('click', () => {
-    activeLetterIdx = (activeLetterIdx - 1 + alphabet.length) % alphabet.length;
-    selectChar.value = alphabet[activeLetterIdx];
-    updateActiveHighlight();
-});
-
-btnNext.addEventListener('click', () => {
-    activeLetterIdx = (activeLetterIdx + 1) % alphabet.length;
-    selectChar.value = alphabet[activeLetterIdx];
-    updateActiveHighlight();
-});
-
-// Button capture
-btnCapture.addEventListener('click', captureAndSaveDataset);
-
-// Keyboard shortcuts
-document.addEventListener('keydown', (e) => {
-    // Cek agar tidak terpicu ketika mengetik di form input/select (jika ada)
-    if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') {
-        return;
-    }
-    
-    const key = e.key.toLowerCase();
-    
-    if (key === 's') {
-        e.preventDefault();
-        captureAndSaveDataset();
-    } else if (key === '[') {
-        e.preventDefault();
-        activeLetterIdx = (activeLetterIdx - 1 + alphabet.length) % alphabet.length;
-        selectChar.value = alphabet[activeLetterIdx];
-        updateActiveHighlight();
-    } else if (key === ']') {
-        e.preventDefault();
-        activeLetterIdx = (activeLetterIdx + 1) % alphabet.length;
-        selectChar.value = alphabet[activeLetterIdx];
-        updateActiveHighlight();
-    } else if (e.key === ' ' || e.code === 'Space') {
-        e.preventDefault();
-        handleSpaceAction();
-    } else if (e.key === 'Backspace') {
-        e.preventDefault();
-        handleBackspaceAction();
-    } else if (e.key === 'Enter') {
-        e.preventDefault();
-        refineSentenceWithAI();
-    } else if (e.key === 'Escape') {
-        e.preventDefault();
-        handleClearAction();
-    } else if (e.key >= '1' && e.key <= '3') {
-        e.preventDefault();
-        selectWordSuggestion(parseInt(e.key, 10) - 1);
-    }
-});
-
-// --- SENTENCE BUILDER CORE LOGIC & ACTIONS ---
-
-const circleCircumference = 43.98;
+const RING_CIRCUMFERENCE = 87.96; // 2*PI*14
 if (progressCircle) {
-    progressCircle.style.strokeDasharray = `${circleCircumference} ${circleCircumference}`;
-    progressCircle.style.strokeDashoffset = circleCircumference;
+    progressCircle.style.strokeDasharray = `${RING_CIRCUMFERENCE} ${RING_CIRCUMFERENCE}`;
+    progressCircle.style.strokeDashoffset = RING_CIRCUMFERENCE;
 }
 
-function setProgress(percent) {
+function setRingProgress(percent) {
     if (!progressCircle) return;
-    const offset = circleCircumference - (percent / 100 * circleCircumference);
-    progressCircle.style.strokeDashoffset = offset;
+    progressCircle.style.strokeDashoffset = RING_CIRCUMFERENCE - (percent / 100 * RING_CIRCUMFERENCE);
 }
 
 function updateSentenceBuilderUI() {
-    if (activeCharDisplay) {
-        activeCharDisplay.textContent = stableLetter ? stableLetter.toUpperCase() : "-";
-    }
+    if (activeCharDisplay) activeCharDisplay.textContent = stableLetter ? stableLetter.toUpperCase() : "-";
 
     const rawSentence = accumulatedWords.join(" ");
-    if (rawTextField) {
-        rawTextField.textContent = rawSentence || (!currentWord ? "-" : "");
-    }
-    if (currentWordField) {
-        if (currentWord) {
-            currentWordField.textContent = currentWord;
-            currentWordField.style.display = "";
-        } else {
-            currentWordField.textContent = "";
-            currentWordField.style.display = "none";
-        }
-    }
-    if (composerPreview) {
-        composerPreview.classList.toggle("composer-empty", !rawSentence && !currentWord);
-    }
-
-    scheduleWordSuggestionsFetch();
+    if (rawTextField) rawTextField.textContent = rawSentence;
+    if (currentWordField) currentWordField.textContent = currentWord;
+    if (composerPreview) composerPreview.classList.toggle("composer-empty", !rawSentence && !currentWord);
 
     const holdPct = getHoldProgressPercent();
-    setProgress(holdPct);
+    setRingProgress(holdPct);
 
-    if (holdProgressBar) {
-        holdProgressBar.style.width = `${holdPct}%`;
-    }
-    if (holdProgressLabel) {
-        if (stableLetter && !hasTypedCurrentSign) {
-            const remaining = Math.max(0, (HOLD_DURATION_MS - (Date.now() - (stableLetterSince || Date.now()))) / 1000);
-            holdProgressLabel.textContent = `Tahan ${remaining.toFixed(1)} dtk`;
+    if (holdLabel) {
+        if (stableLetter && armed) {
+            const remaining = Math.max(0, (holdDurationMs - (Date.now() - stableSince)) / 1000);
+            holdLabel.textContent = `Tahan ${remaining.toFixed(1)}s`;
+        } else if (stableLetter && !armed) {
+            holdLabel.textContent = "Tersimpan ✓";
         } else {
-            holdProgressLabel.textContent = "Tahan ~1,5 dtk";
+            holdLabel.textContent = "Tahan isyarat";
         }
     }
 }
 
 function renderWordSuggestions() {
     if (!wordSuggestionsEl) return;
-
     wordSuggestionsEl.innerHTML = "";
 
     if (!currentWord || currentWord.length < 2) {
-        const btn = document.createElement("button");
-        btn.type = "button";
-        btn.className = "word-suggestion empty";
-        btn.disabled = true;
-        btn.textContent = currentWord.length === 1
-            ? "Ketik 1 huruf lagi untuk prediksi..."
-            : "Mengetik isyarat...";
-        wordSuggestionsEl.appendChild(btn);
+        appendEmptySuggestion(currentWord.length === 1 ? "Ketik 1 huruf lagi..." : "Mulai mengetik isyarat...");
         return;
     }
-
     if (isFetchingSuggestions) {
         const btn = document.createElement("button");
-        btn.type = "button";
         btn.className = "word-suggestion loading";
         btn.disabled = true;
         btn.innerHTML = `<i class="fa-solid fa-circle-notch fa-spin"></i> Mencari kata...`;
         wordSuggestionsEl.appendChild(btn);
         return;
     }
-
     if (wordSuggestions.length === 0) {
-        const btn = document.createElement("button");
-        btn.type = "button";
-        btn.className = "word-suggestion empty";
-        btn.disabled = true;
-        btn.textContent = "Tidak ada prediksi cocok";
-        wordSuggestionsEl.appendChild(btn);
+        appendEmptySuggestion("Tidak ada prediksi cocok");
         return;
     }
 
     const partial = currentWord.toLowerCase();
-    wordSuggestions.slice(0, 3).forEach((word, index) => {
+    wordSuggestions.slice(0, 3).forEach((word, i) => {
         const btn = document.createElement("button");
-        btn.type = "button";
         const isTypoFix = partial.length >= 2 && !word.toLowerCase().startsWith(partial);
         btn.className = `word-suggestion${isTypoFix ? " word-suggestion-corrected" : ""}`;
-        btn.title = isTypoFix
-            ? `Koreksi "${partial}" → "${word}" (tekan ${index + 1})`
-            : `Pilih "${word}" (tekan ${index + 1})`;
-        const fixBadge = isTypoFix ? `<span class="word-suggestion-fix" title="Auto-koreksi typo">✓</span>` : "";
-        btn.innerHTML = `<span class="word-suggestion-key">${index + 1}</span><span class="word-suggestion-text">${word}</span>${fixBadge}`;
-        btn.addEventListener("click", () => selectWordSuggestion(index));
+        btn.title = isTypoFix ? `Koreksi "${partial}" → "${word}" (tekan ${i + 1})` : `Pilih "${word}" (tekan ${i + 1})`;
+        const fix = isTypoFix ? `<span class="word-suggestion-fix" title="Auto-koreksi">✓</span>` : "";
+        btn.innerHTML = `<span class="word-suggestion-key">${i + 1}</span><span class="word-suggestion-text">${word}</span>${fix}`;
+        btn.addEventListener("click", () => selectWordSuggestion(i));
         wordSuggestionsEl.appendChild(btn);
     });
+}
 
-    while (wordSuggestionsEl.children.length < 3) {
-        const btn = document.createElement("button");
-        btn.type = "button";
-        btn.className = "word-suggestion empty";
-        btn.disabled = true;
-        btn.textContent = "—";
-        wordSuggestionsEl.appendChild(btn);
-    }
+function appendEmptySuggestion(text) {
+    const btn = document.createElement("button");
+    btn.className = "word-suggestion empty";
+    btn.disabled = true;
+    btn.textContent = text;
+    wordSuggestionsEl.appendChild(btn);
 }
 
 function scheduleWordSuggestionsFetch() {
     const partial = currentWord.toLowerCase().trim();
-    const scheduleKey = `${partial}|${accumulatedWords.join(" ")}`;
-
+    const key = `${partial}|${accumulatedWords.join(" ")}`;
     if (partial.length < 2) {
-        if (lastScheduledPartial !== "") {
-            lastScheduledPartial = "";
+        if (lastScheduledKey !== "") {
+            lastScheduledKey = "";
             wordSuggestions = [];
             lastSuggestionRequest = "";
-            if (wordSuggestionDebounce) {
-                clearTimeout(wordSuggestionDebounce);
-                wordSuggestionDebounce = null;
-            }
+            if (wordSuggestionDebounce) { clearTimeout(wordSuggestionDebounce); wordSuggestionDebounce = null; }
             renderWordSuggestions();
         }
         return;
     }
-
-    if (scheduleKey === lastScheduledPartial) {
-        return;
-    }
-
-    lastScheduledPartial = scheduleKey;
-    if (wordSuggestionDebounce) {
-        clearTimeout(wordSuggestionDebounce);
-    }
+    if (key === lastScheduledKey) return;
+    lastScheduledKey = key;
+    if (wordSuggestionDebounce) clearTimeout(wordSuggestionDebounce);
     wordSuggestionDebounce = setTimeout(fetchWordSuggestions, WORD_SUGGESTION_DEBOUNCE_MS);
 }
 
 async function fetchWordSuggestions() {
     const partial = currentWord.toLowerCase().trim();
-    if (partial.length < 2) {
-        wordSuggestions = [];
-        renderWordSuggestions();
-        return;
-    }
+    if (partial.length < 2) { wordSuggestions = []; renderWordSuggestions(); return; }
 
-    const requestKey = `${partial}|${accumulatedWords.join(" ")}|${languageSelect ? languageSelect.value : "auto"}`;
-    if (requestKey === lastSuggestionRequest && wordSuggestions.length > 0) {
-        renderWordSuggestions();
-        return;
-    }
+    const reqKey = `${partial}|${accumulatedWords.join(" ")}|${languageSelect ? languageSelect.value : "auto"}`;
+    if (reqKey === lastSuggestionRequest && wordSuggestions.length > 0) { renderWordSuggestions(); return; }
 
     isFetchingSuggestions = true;
     renderWordSuggestions();
-
     try {
         const response = await fetch('/predict_words', {
             method: 'POST',
@@ -714,15 +762,13 @@ async function fetchWordSuggestions() {
                 language: languageSelect ? languageSelect.value : "auto"
             })
         });
-
         if (response.ok) {
             const result = await response.json();
             if (!result.error && partial === currentWord.toLowerCase().trim()) {
                 wordSuggestions = result.suggestions || [];
-                lastSuggestionRequest = requestKey;
-                if (result.detected_language) {
-                    lastDetectedLanguage = result.detected_language;
-                }
+                lastSuggestionRequest = reqKey;
+                if (result.detected_language) lastDetectedLanguage = result.detected_language;
+                if (result.ai_status) updateAiSourceChip(result.ai_status);
             }
         }
     } catch (e) {
@@ -735,12 +781,11 @@ async function fetchWordSuggestions() {
 
 function selectWordSuggestion(index) {
     if (index < 0 || index >= wordSuggestions.length) return;
-
     accumulatedWords.push(wordSuggestions[index].toLowerCase());
     currentWord = "";
     wordSuggestions = [];
     lastSuggestionRequest = "";
-    lastScheduledPartial = "";
+    lastScheduledKey = "";
     resetStableState();
     updateSentenceBuilderUI();
     renderWordSuggestions();
@@ -752,18 +797,18 @@ function handleSpaceAction() {
         currentWord = "";
         wordSuggestions = [];
         lastSuggestionRequest = "";
-        lastScheduledPartial = "";
+        lastScheduledKey = "";
+        resetStableState();
         updateSentenceBuilderUI();
         renderWordSuggestions();
     }
 }
 
 function handleBackspaceAction() {
-    if (currentWord) {
-        currentWord = currentWord.slice(0, -1);
-    } else if (accumulatedWords.length > 0) {
-        accumulatedWords.pop();
-    }
+    if (currentWord) currentWord = currentWord.slice(0, -1);
+    else if (accumulatedWords.length > 0) accumulatedWords.pop();
+    resetStableState();
+    scheduleWordSuggestionsFetch();
     updateSentenceBuilderUI();
 }
 
@@ -772,86 +817,55 @@ function handleClearAction() {
     accumulatedWords = [];
     wordSuggestions = [];
     lastSuggestionRequest = "";
-    lastScheduledPartial = "";
+    lastScheduledKey = "";
     resetStableState();
     if (refinedSentenceField) refinedSentenceField.textContent = "-";
-    if (aiSource) aiSource.textContent = defaultAiSourceStatus;
-    if (thoughtList) {
-        thoughtList.innerHTML = `<li class="empty-thought">Menunggu kata terkumpul...</li>`;
-    }
+    if (aiSource) aiSource.innerHTML = `<i class="fa-solid fa-microchip"></i> ${defaultAiSourceStatus}`;
+    if (thoughtList) thoughtList.innerHTML = `<li class="empty-thought">Menunggu kata terkumpul...</li>`;
     updateSentenceBuilderUI();
     renderWordSuggestions();
 }
 
 async function refineSentenceWithAI() {
     if (isRefining) return;
-    
     let rawSentence = accumulatedWords.join(" ");
-    if (currentWord) {
-        rawSentence += (rawSentence ? " " : "") + currentWord;
-    }
-    
+    if (currentWord) rawSentence += (rawSentence ? " " : "") + currentWord;
     if (!rawSentence.trim()) return;
-    
+
     isRefining = true;
-    if (btnRefine) {
-        btnRefine.disabled = true;
-        btnRefine.innerHTML = `<i class="fa-solid fa-circle-notch fa-spin"></i> Merangkai...`;
-    }
-    
-    if (thoughtList) {
-        thoughtList.innerHTML = `<li><i class="fa-solid fa-spinner fa-spin"></i> Sistem sedang menganalisis susunan kata mentah...</li>`;
-    }
-    
+    if (btnRefine) { btnRefine.disabled = true; btnRefine.innerHTML = `<i class="fa-solid fa-circle-notch fa-spin"></i> Merangkai...`; }
+    if (thoughtList) thoughtList.innerHTML = `<li><i class="fa-solid fa-spinner fa-spin"></i> Menganalisis susunan kata...</li>`;
+
     try {
         const response = await fetch('/refine_sentence', {
             method: 'POST',
-            headers: {
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({
-                raw_text: rawSentence,
-                language: languageSelect ? languageSelect.value : "auto"
-            })
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ raw_text: rawSentence, language: languageSelect ? languageSelect.value : "auto" })
         });
-        
         if (response.ok) {
             const result = await response.json();
             if (!result.error) {
-                if (refinedSentenceField) refinedSentenceField.textContent = result.refined;
-                if (aiSource) {
-                    const langLabel = result.detected_language === "en" ? "EN" : "ID";
-                    aiSource.textContent = `${result.source} (${langLabel})`;
-                }
-                if (result.detected_language) {
-                    lastDetectedLanguage = result.detected_language;
-                }
-                
+                if (refinedSentenceField) refinedSentenceField.textContent = result.refined || "-";
+                const langLabel = result.detected_language === "en" ? "EN" : "ID";
+                if (result.ai_status) updateAiSourceChip(result.ai_status, langLabel);
+                else if (result.source) updateAiSourceChip(result.source, langLabel);
+                if (result.detected_language) lastDetectedLanguage = result.detected_language;
                 if (thoughtList) {
                     thoughtList.innerHTML = "";
-                    if (result.thought && result.thought.length > 0) {
-                        result.thought.forEach(step => {
-                            const li = document.createElement('li');
-                            li.textContent = step;
-                            thoughtList.appendChild(li);
-                        });
-                    } else {
-                        thoughtList.innerHTML = `<li>Penyusunan kalimat selesai.</li>`;
-                    }
+                    (result.thought && result.thought.length ? result.thought : ["Penyusunan kalimat selesai."]).forEach(step => {
+                        const li = document.createElement('li');
+                        li.textContent = step;
+                        thoughtList.appendChild(li);
+                    });
                 }
             }
         }
     } catch (e) {
         console.error("Gagal merangkai kalimat:", e);
-        if (thoughtList) {
-            thoughtList.innerHTML = `<li style="color: #ef4444;">Gagal menghubungi server penyusun.</li>`;
-        }
+        if (thoughtList) thoughtList.innerHTML = `<li style="color:#ef4444;">Gagal menghubungi server.</li>`;
     } finally {
         isRefining = false;
-        if (btnRefine) {
-            btnRefine.disabled = false;
-            btnRefine.innerHTML = `<i class="fa-solid fa-language"></i> Rangkai`;
-        }
+        if (btnRefine) { btnRefine.disabled = false; btnRefine.innerHTML = `<i class="fa-solid fa-language"></i> Rangkai`; }
     }
 }
 
@@ -859,60 +873,99 @@ function speakSentence() {
     if (!refinedSentenceField) return;
     const text = refinedSentenceField.textContent;
     if (!text || text === "-" || text === "") return;
-    
     if ('speechSynthesis' in window) {
-        const utterance = new SpeechSynthesisUtterance(text);
-        const selectedLang = languageSelect ? languageSelect.value : "auto";
-        const speakLang = selectedLang === "en" || (selectedLang === "auto" && lastDetectedLanguage === "en")
-            ? "en-US"
-            : "id-ID";
-        utterance.lang = speakLang;
-        window.speechSynthesis.speak(utterance);
-        
-        if (btnSpeak) {
-            btnSpeak.style.background = 'var(--accent-green)';
-            btnSpeak.style.color = '#fff';
-            setTimeout(() => {
-                btnSpeak.style.background = '#1F2937';
-                btnSpeak.style.color = 'var(--text-primary)';
-            }, 1000);
-        }
+        const utter = new SpeechSynthesisUtterance(text);
+        const sel = languageSelect ? languageSelect.value : "auto";
+        utter.lang = (sel === "en" || (sel === "auto" && lastDetectedLanguage === "en")) ? "en-US" : "id-ID";
+        window.speechSynthesis.speak(utter);
     } else {
-        alert("Text-to-Speech tidak didukung di browser Anda.");
+        alert("Text-to-Speech tidak didukung di browser ini.");
     }
 }
 
-// Register Click Listeners for Sentence Builder Buttons
+// ============================================================
+// 7. EVENT LISTENERS
+// ============================================================
+
+selectChar.addEventListener('change', () => {
+    activeLetterIdx = alphabet.indexOf(selectChar.value);
+    updateTargetDisplay();
+    updateActiveHighlight();
+});
+
+btnPrev.addEventListener('click', () => changeTarget(-1));
+btnNext.addEventListener('click', () => changeTarget(1));
+btnCapture.addEventListener('click', captureAndSaveDataset);
+
+function changeTarget(delta) {
+    activeLetterIdx = (activeLetterIdx + delta + alphabet.length) % alphabet.length;
+    selectChar.value = alphabet[activeLetterIdx];
+    updateTargetDisplay();
+    updateActiveHighlight();
+}
+
 if (btnSpace) btnSpace.addEventListener('click', handleSpaceAction);
 if (btnBackspace) btnBackspace.addEventListener('click', handleBackspaceAction);
 if (btnClearSentence) btnClearSentence.addEventListener('click', handleClearAction);
 if (btnRefine) btnRefine.addEventListener('click', refineSentenceWithAI);
 if (btnSpeak) btnSpeak.addEventListener('click', speakSentence);
-if (languageSelect) {
-    languageSelect.addEventListener('change', () => {
-        lastSuggestionRequest = "";
-        lastScheduledPartial = "";
-        scheduleWordSuggestionsFetch();
-    });
+
+if (languageSelect) languageSelect.addEventListener('change', () => {
+    lastSuggestionRequest = ""; lastScheduledKey = "";
+    scheduleWordSuggestionsFetch();
+});
+
+if (sensitivitySelect) sensitivitySelect.addEventListener('change', () => {
+    const preset = SENSITIVITY[sensitivitySelect.value] || SENSITIVITY.normal;
+    holdDurationMs = preset.hold;
+    minConfidence = preset.conf;
+    resetStableState();
+});
+
+document.addEventListener('keydown', (e) => {
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT' || e.target.tagName === 'TEXTAREA') return;
+    const key = e.key.toLowerCase();
+
+    if (key === 's') { e.preventDefault(); switchMode('collect'); captureAndSaveDataset(); }
+    else if (key === '[') { e.preventDefault(); changeTarget(-1); }
+    else if (key === ']') { e.preventDefault(); changeTarget(1); }
+    else if (e.key === ' ' || e.code === 'Space') { e.preventDefault(); handleSpaceAction(); }
+    else if (e.key === 'Backspace') { e.preventDefault(); handleBackspaceAction(); }
+    else if (e.key === 'Enter') { e.preventDefault(); refineSentenceWithAI(); }
+    else if (e.key === 'Escape') { e.preventDefault(); handleClearAction(); }
+    else if (e.key >= '1' && e.key <= '3') { e.preventDefault(); selectWordSuggestion(parseInt(e.key, 10) - 1); }
+});
+
+// ============================================================
+// 8. START
+// ============================================================
+
+async function fetchAiStatus() {
+    try {
+        const response = await fetch('/ai_status');
+        if (response.ok) {
+            const data = await response.json();
+            if (data.status) updateAiSourceChip(data.status);
+        }
+    } catch (_) { /* chip tetap pakai nilai dari server saat render HTML */ }
 }
 
-// --- 5. START APP ---
 async function startApp() {
     populateDropdown();
+    requestAnimationFrame(localPreviewLoop);
+    await fetchAiStatus();
     await fetchDatasetCounts();
     renderWordSuggestions();
-    
+    updateSentenceBuilderUI();
     try {
         await setupWebcam();
         window.addEventListener('resize', syncWebcamLayout);
-
-        setInterval(runPrediction, PREDICTION_INTERVAL_MS);
-        setInterval(updateSentenceBuilderUI, 50);
+        predictionLoop();
+        setInterval(updateSentenceBuilderUI, 100);
         requestAnimationFrame(renderHUDLoop);
     } catch (err) {
         console.error("Gagal memulai aplikasi:", err);
     }
 }
 
-// Start
 window.addEventListener('DOMContentLoaded', startApp);

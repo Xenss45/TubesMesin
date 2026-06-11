@@ -1,17 +1,29 @@
 import os
+
+# Sembunyikan log MediaPipe / TensorFlow Lite (harus sebelum import mediapipe)
+os.environ.setdefault("GLOG_minloglevel", "2")
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
+os.environ.setdefault("MP_VERBOSE", "0")
+
 import cv2
 import numpy as np
 import base64
 import time
-import sys
+import logging
 import warnings
 from flask import Flask, render_template, request, jsonify
 from flask_cors import CORS
 from dotenv import load_dotenv
 
-load_dotenv(encoding="utf-8-sig")
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+load_dotenv(os.path.join(BASE_DIR, ".env"), encoding="utf-8-sig")
 
 warnings.filterwarnings('ignore')
+
+# Sederhanakan output terminal: sembunyikan log request per-frame & warning bawaan
+logging.getLogger("werkzeug").setLevel(logging.ERROR)
+logging.getLogger("absl").setLevel(logging.ERROR)
+logging.getLogger("tensorflow").setLevel(logging.ERROR)
 
 try:
     import google.generativeai as genai
@@ -20,29 +32,105 @@ except ImportError:
     HAS_GEMINI = False
 
 # Set Keras backend sebelum import
-os.environ['KERAS_BACKEND'] = 'jax'
-from model_utils import load_model_compatible
+os.environ["KERAS_BACKEND"] = "jax"
+import json
+import shutil
+import tempfile
+
+import h5py
+from keras import models
+
+from hand_segmentation import init_hand_landmarker, is_mediapipe_ready, segment_hand
+from dataset_utils import preprocess_gray_for_cnn
+
+
+def load_cnn_model(path):
+    """Muat model .h5; perbaiki quantization_config jika Keras menolak."""
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"Model file '{path}' tidak ditemukan.")
+    try:
+        return models.load_model(path)
+    except (TypeError, ValueError) as err:
+        if "quantization_config" not in str(err):
+            raise
+        with h5py.File(path, "r") as src:
+            config = json.loads(src.attrs["model_config"])
+
+            def _strip_quant(obj):
+                if isinstance(obj, dict):
+                    obj.pop("quantization_config", None)
+                    for v in obj.values():
+                        _strip_quant(v)
+                elif isinstance(obj, list):
+                    for item in obj:
+                        _strip_quant(item)
+
+            _strip_quant(config)
+            fixed = json.dumps(config).encode("utf-8")
+        fd, tmp = tempfile.mkstemp(suffix=".h5")
+        os.close(fd)
+        try:
+            shutil.copy2(path, tmp)
+            with h5py.File(tmp, "r+") as dst:
+                dst.attrs["model_config"] = fixed
+            return models.load_model(tmp)
+        finally:
+            if os.path.exists(tmp):
+                os.remove(tmp)
 
 app = Flask(__name__)
 CORS(app)
 
-model_path = 'sign_language_cnn_model.h5'
-dataset_dir = "dataset"
+MODELS_DIR = os.path.join(BASE_DIR, "models")
+model_path = os.path.join(MODELS_DIR, "sign_language_cnn_model.h5")
+_legacy_model_path = os.path.join(BASE_DIR, "sign_language_cnn_model.h5")
+if not os.path.exists(model_path) and os.path.exists(_legacy_model_path):
+    model_path = _legacy_model_path
+dataset_dir = os.path.join(BASE_DIR, "dataset")
+
+# Ukuran input model CNN — wajib 64x64 (sama dengan train_model.py)
+REQUIRED_IMG_SIZE = 64
+IMG_SIZE = REQUIRED_IMG_SIZE
+PREVIEW_SIZE = 192  # ukuran tampilan preview UI saja (bukan input model)
+# Ukuran kotak ROI (area tangan) pada frame kamera. Harus sama dengan nilai di app.js.
+ROI_BOX_SIZE = 300
+# Resolusi penyimpanan dataset (disimpan besar agar detail terjaga untuk training).
+SAVE_SIZE = 256
 
 # Hardcode alfabet dan angka sesuai folder di dataset (36 kelas)
 alphabet = "0123456789abcdefghijklmnopqrstuvwxyz"
 label_map = {i: char for i, char in enumerate(alphabet)}
 
-# Load model secara global saat startup
-model = None
+# Model CNN global (nama cnn_model agar tidak bentrok dengan variabel Gemini)
+cnn_model = None
 if not os.path.exists(model_path):
-    print(f"[ERROR] Model file '{model_path}' tidak ditemukan!")
+    print(f"  [!] Model '{model_path}' tidak ditemukan. Jalankan train_model.py dulu.")
 else:
     try:
-        model = load_model_compatible(model_path)
-        print("[OK] Model CNN berhasil dimuat.")
+        cnn_model = load_cnn_model(model_path)
+        in_h = int(cnn_model.input_shape[1] or 0)
+        in_w = int(cnn_model.input_shape[2] or 0)
+        if in_h != REQUIRED_IMG_SIZE or in_w != REQUIRED_IMG_SIZE:
+            print(
+                f"  [!] Model harus input {REQUIRED_IMG_SIZE}x{REQUIRED_IMG_SIZE}, "
+                f"file ini {in_w}x{in_h}. Jalankan train_model.py untuk buat model baru."
+            )
+            cnn_model = None
+        else:
+            dummy = np.zeros((1, IMG_SIZE, IMG_SIZE, 1), dtype=np.float32)
+            cnn_model.predict(dummy, verbose=0)
+            print(f"  [OK] Model dimuat (input {IMG_SIZE}x{IMG_SIZE}).")
     except Exception as e:
-        print(f"[ERROR] Error memuat model: {e}")
+        print(f"  [!] Gagal memuat model: {e}")
+        cnn_model = None
+
+def bytes_to_cv2(img_bytes):
+    try:
+        nparr = np.frombuffer(img_bytes, np.uint8)
+        return cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+    except Exception:
+        return None
+
 
 # Helper to convert base64 image from frontend to OpenCV image
 def base64_to_cv2(b64_string):
@@ -57,73 +145,56 @@ def base64_to_cv2(b64_string):
         print(f"[ERROR] Gagal memecahkan base64: {e}")
         return None
 
-def segment_hand_skin(roi):
-    """
-    Mengubah background ROI menjadi hitam pekat menggunakan filter warna kulit (HSV)
-    agar sesuai dengan gambar pada dataset training (yang berbackground hitam).
-    """
-    try:
-        # Convert BGR ke HSV
-        hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
-        
-        # Range warna kulit yang lebih toleran (S min 20, V min 40 untuk mengatasi bayangan/cahaya redup)
-        lower_skin1 = np.array([0, 20, 40], dtype=np.uint8)
-        upper_skin1 = np.array([25, 255, 255], dtype=np.uint8)
-        
-        lower_skin2 = np.array([160, 20, 40], dtype=np.uint8)
-        upper_skin2 = np.array([180, 255, 255], dtype=np.uint8)
-        
-        # Buat mask warna kulit
-        mask1 = cv2.inRange(hsv, lower_skin1, upper_skin1)
-        mask2 = cv2.inRange(hsv, lower_skin2, upper_skin2)
-        skin_mask = cv2.bitwise_or(mask1, mask2)
-        
-        # Operasi morfologi untuk menutup lubang kecil pada deteksi tangan
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-        skin_mask = cv2.morphologyEx(skin_mask, cv2.MORPH_CLOSE, kernel)
-        
-        # Blackout background (selain warna kulit diubah menjadi hitam)
-        segmented_roi = cv2.bitwise_and(roi, roi, mask=skin_mask)
-        return segmented_roi
-    except:
-        return roi
+MIN_MEAN_BRIGHTNESS = 5
 
-def get_fixed_roi_coords(w, h, box_size=240):
+HAND_SEGMENTATION_MODE = "mediapipe"
+if init_hand_landmarker():
+    print("  [OK] MediaPipe HandLandmarker siap (masking green-screen).")
+else:
+    HAND_SEGMENTATION_MODE = "kulit"
+    print("  [!] MediaPipe tidak siap — fallback deteksi warna kulit.")
+
+
+def get_fixed_roi_coords(w, h, box_size=ROI_BOX_SIZE):
     """
-    Mendapatkan koordinat area kotak ROI di tengah-kanan frame (seperti versi desktop)
+    Mendapatkan koordinat kotak ROI di tengah frame (simetris, ramah untuk mirror).
     """
-    x_min = int(w * 0.55) - int(box_size * 0.5)
-    y_min = int(h * 0.5) - int(box_size * 0.5)
-    x_max = x_min + box_size
-    y_max = y_min + box_size
+    box = min(box_size, w, h)
+    x_min = int(w * 0.5 - box * 0.5)
+    y_min = int(h * 0.5 - box * 0.5)
+    x_max = x_min + box
+    y_max = y_min + box
     
     # Validasi batas frame
     return max(0, x_min), max(0, y_min), min(w, x_max), min(h, y_max)
 
-MIN_SKIN_PIXELS = 2500
-MIN_MEAN_BRIGHTNESS = 5
 
-def is_hand_in_roi(segmented_roi):
-    """Cek apakah ROI berisi tangan (bukan gambar full hitam)."""
-    gray_seg = cv2.cvtColor(segmented_roi, cv2.COLOR_BGR2GRAY)
-    skin_pixel_count = cv2.countNonZero(gray_seg)
-    if skin_pixel_count < MIN_SKIN_PIXELS:
-        return False, gray_seg
-    if float(np.mean(gray_seg)) < MIN_MEAN_BRIGHTNESS:
-        return False, gray_seg
-    return True, gray_seg
+def is_hand_in_gray(gray_img):
+    """Cek tangan dari citra grayscale 64x64 (lebih ringan dari full ROI)."""
+    min_pixels = max(80, int(gray_img.shape[0] * gray_img.shape[1] * 0.015))
+    if cv2.countNonZero(gray_img) < min_pixels:
+        return False
+    return float(np.mean(gray_img)) >= MIN_MEAN_BRIGHTNESS
 
-def make_mini_roi_base64(gray_seg):
-    gray_resized = cv2.resize(gray_seg, (100, 100), interpolation=cv2.INTER_NEAREST)
-    _, buffer = cv2.imencode('.png', gray_resized)
-    return "data:image/png;base64," + base64.b64encode(buffer).decode('utf-8')
 
-def empty_prediction_response(x_min, y_min, x_max, y_max, gray_seg=None):
-    mini_roi = make_mini_roi_base64(gray_seg) if gray_seg is not None else ""
+def make_mini_roi_base64(gray_img):
+    """Preview input CNN — sama persis dengan grayscale 64x64 (tanpa normalisasi min-max)."""
+    if gray_img is None:
+        return ""
+    preview = cv2.resize(
+        gray_img.astype(np.uint8), (PREVIEW_SIZE, PREVIEW_SIZE), interpolation=cv2.INTER_LINEAR
+    )
+    _, buffer = cv2.imencode('.jpg', preview, [int(cv2.IMWRITE_JPEG_QUALITY), 72])
+    return "data:image/jpeg;base64," + base64.b64encode(buffer).decode('utf-8')
+
+def empty_prediction_response(x_min, y_min, x_max, y_max, gray_seg=None, mini_roi=None):
+    if mini_roi is None:
+        mini_roi = make_mini_roi_base64(gray_seg) if gray_seg is not None else ""
     return jsonify({
         "char": "?",
         "confidence": 0.0,
         "hand_detected": False,
+        "top3": [],
         "x_min": x_min,
         "y_min": y_min,
         "x_max": x_max,
@@ -133,80 +204,98 @@ def empty_prediction_response(x_min, y_min, x_max, y_max, gray_seg=None):
 
 def preprocess_for_prediction(roi):
     """
-    Ubah ROI menjadi format 28x28 grayscale dengan background hitam pekat
+    Ubah ROI menjadi 64x64 grayscale. MediaPipe segmentasi di resolusi ROI penuh.
     """
     try:
-        # 1. Segmentasikan warna kulit agar background di luar tangan menjadi hitam pekat
-        segmented_roi = segment_hand_skin(roi)
-        
-        # 2. Konversi ke Grayscale
-        gray = cv2.cvtColor(segmented_roi, cv2.COLOR_BGR2GRAY)
-        
-        # 3. Resize ke 28x28 piksel
-        resized = cv2.resize(gray, (28, 28), interpolation=cv2.INTER_AREA)
-        
-        # 4. Normalisasi
-        normalized = resized / 255.0
-        
-        # Tambah dimensi batch dan channel -> (1, 28, 28, 1)
+        segmented = segment_hand(roi)
+        gray = cv2.cvtColor(segmented, cv2.COLOR_BGR2GRAY)
+        normalized = preprocess_gray_for_cnn(gray, IMG_SIZE)
+        if normalized is None:
+            return None, None
+        gray_64 = (normalized * 255).astype(np.uint8)
         input_image = np.expand_dims(normalized, axis=-1)
         input_image = np.expand_dims(input_image, axis=0)
-        return input_image, segmented_roi
+        return input_image, gray_64
     except Exception as e:
         print(f"[ERROR] Preprocessing failed: {e}")
-        return None, roi
+        return None, None
 
 @app.route('/')
 def index():
     return render_template('index.html', ai_source_status=AI_SOURCE_STATUS)
 
+def _parse_predict_request():
+    """Terima JPEG binary (FormData) atau JSON base64."""
+    skip_preview = False
+    roi_only = False
+    frame = None
+
+    if request.files and 'image' in request.files:
+        skip_preview = request.form.get('skip_preview', '0') in ('1', 'true', 'yes')
+        roi_only = request.form.get('roi_only', '0') in ('1', 'true', 'yes')
+        frame = bytes_to_cv2(request.files['image'].read())
+    else:
+        data = request.get_json(silent=True)
+        if data and 'image' in data:
+            skip_preview = bool(data.get('skip_preview', False))
+            roi_only = bool(data.get('roi_only', False))
+            frame = base64_to_cv2(data['image'])
+
+    return frame, skip_preview, roi_only
+
+
 @app.route('/predict', methods=['POST'])
-def predict():
+def predict_sign():
     try:
-        data = request.get_json()
-        if not data or 'image' not in data:
-            return jsonify({"error": "Data gambar tidak dikirimkan"}), 400
-        
-        frame = base64_to_cv2(data['image'])
+        frame, skip_preview, roi_only = _parse_predict_request()
         if frame is None:
-            return jsonify({"error": "Gagal membaca format base64"}), 400
-        
+            return jsonify({"error": "Data gambar tidak dikirimkan"}), 400
+
         h, w = frame.shape[:2]
-        x_min, y_min, x_max, y_max = get_fixed_roi_coords(w, h)
-        print(f"[DEBUG] frame shape: {w}x{h}, ROI coords: {x_min},{y_min} to {x_max},{y_max}", flush=True)
-        
-        # Potong ROI dari frame asli (non-mirrored)
-        roi = frame[y_min:y_max, x_min:x_max]
-        
-        if roi.size > 0:
-            # Save raw crop for debugging
-            cv2.imwrite("debug_roi_raw.jpg", roi)
-            input_image, segmented_roi = preprocess_for_prediction(roi)
-            cv2.imwrite("debug_roi_segmented.jpg", segmented_roi)
-            print(f"[DEBUG] ROI mean: {np.mean(roi):.2f}, segmented ROI mean: {np.mean(segmented_roi):.2f}", flush=True)
-            if input_image is not None and model is not None:
-                hand_detected, gray_seg = is_hand_in_roi(segmented_roi)
-                if not hand_detected:
-                    return empty_prediction_response(x_min, y_min, x_max, y_max, gray_seg)
-                
-                prediction = model.predict(input_image, verbose=0)
-                predicted_idx = np.argmax(prediction)
-                predicted_char = label_map.get(predicted_idx, "?")
-                confidence = float(prediction[0][predicted_idx])
-                
-                return jsonify({
-                    "char": predicted_char,
-                    "confidence": confidence,
-                    "hand_detected": True,
-                    "x_min": x_min,
-                    "y_min": y_min,
-                    "x_max": x_max,
-                    "y_max": y_max,
-                    "mini_roi": make_mini_roi_base64(gray_seg)
-                })
-        
-        return empty_prediction_response(x_min, y_min, x_max, y_max)
+        if roi_only:
+            roi = frame
+            x_min, y_min, x_max, y_max = 0, 0, w, h
+        else:
+            x_min, y_min, x_max, y_max = get_fixed_roi_coords(w, h)
+            roi = frame[y_min:y_max, x_min:x_max]
+
+        if roi.size == 0:
+            return empty_prediction_response(x_min, y_min, x_max, y_max)
+
+        input_image, gray_input = preprocess_for_prediction(roi)
+        mini_roi = "" if skip_preview else make_mini_roi_base64(gray_input)
+
+        if input_image is None or cnn_model is None:
+            return empty_prediction_response(x_min, y_min, x_max, y_max, mini_roi=mini_roi)
+
+        if not is_hand_in_gray(gray_input):
+            return empty_prediction_response(x_min, y_min, x_max, y_max, mini_roi=mini_roi)
+
+        probs = cnn_model.predict(input_image, verbose=0)
+        probs = np.asarray(probs[0])
+        predicted_idx = int(np.argmax(probs))
+        predicted_char = label_map.get(predicted_idx, "?")
+        confidence = float(probs[predicted_idx])
+
+        top_idx = np.argsort(probs)[::-1][:3]
+        top3 = [
+            {"char": label_map.get(int(i), "?"), "confidence": float(probs[i])}
+            for i in top_idx
+        ]
+
+        return jsonify({
+            "char": predicted_char,
+            "confidence": confidence,
+            "hand_detected": True,
+            "top3": top3,
+            "x_min": x_min,
+            "y_min": y_min,
+            "x_max": x_max,
+            "y_max": y_max,
+            "mini_roi": mini_roi
+        })
     except Exception as e:
+        print(f"  [!] Error /predict: {e}")
         return jsonify({"error": str(e)}), 500
 
 @app.route('/save_dataset', methods=['POST'])
@@ -231,9 +320,9 @@ def save_dataset():
         roi = frame[y_min:y_max, x_min:x_max]
         
         if roi.size > 0:
-            # Terapkan segmentasi warna kulit dan simpan dalam ukuran 200x200
-            roi_segmented = segment_hand_skin(roi)
-            roi_resized = cv2.resize(roi_segmented, (200, 200), interpolation=cv2.INTER_AREA)
+            # Terapkan segmentasi warna kulit dan simpan dalam resolusi tinggi
+            roi_segmented = segment_hand(roi)
+            roi_resized = cv2.resize(roi_segmented, (SAVE_SIZE, SAVE_SIZE), interpolation=cv2.INTER_AREA)
             
             timestamp = int(time.time() * 1000)
             target_folder = os.path.join(dataset_dir, target_char)
@@ -271,14 +360,47 @@ def get_dataset_counts():
 
 # --- ASISTEN PENERJEMAH BAHASA ISYARAT HELPERS ---
 GEMINI_API_KEY = (os.environ.get("GEMINI_API_KEY") or "").strip()
-AI_SOURCE_STATUS = "Sistem Awan (Siap)" if HAS_GEMINI and GEMINI_API_KEY else "Sistem Lokal"
+GEMINI_MODEL = (os.environ.get("GEMINI_MODEL") or "gemini-2.5-flash").strip()
+gemini_cloud_ok = bool(HAS_GEMINI and GEMINI_API_KEY)
+
+
+def gemini_error_reason(exc):
+    msg = str(exc).lower()
+    if "429" in msg or "quota" in msg or "rate" in msg:
+        return "kuota API habis"
+    if "401" in msg or "403" in msg or "api key" in msg or "permission" in msg:
+        return "API key tidak valid"
+    return "koneksi bermasalah"
+
+
+def refresh_ai_source_status():
+    global AI_SOURCE_STATUS
+    if not HAS_GEMINI or not GEMINI_API_KEY:
+        AI_SOURCE_STATUS = "Sistem Lokal"
+    elif gemini_cloud_ok:
+        AI_SOURCE_STATUS = "Sistem Awan (Siap)"
+    else:
+        AI_SOURCE_STATUS = "Sistem Awan (Offline)"
+    return AI_SOURCE_STATUS
+
+
+def mark_gemini_unavailable(exc):
+    global gemini_cloud_ok
+    if gemini_cloud_ok:
+        gemini_cloud_ok = False
+        reason = gemini_error_reason(exc)
+        print(f"  [!] Gemini tidak dapat dipakai ({reason}). Memakai mode lokal.")
+        refresh_ai_source_status()
+
+
+AI_SOURCE_STATUS = refresh_ai_source_status()
 
 if HAS_GEMINI and GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
 elif not HAS_GEMINI:
-    print("[WARN] Package google-generativeai belum terinstall. Fitur Gemini memakai fallback lokal.")
+    print("  [!] Package google-generativeai belum terinstall. Fitur Gemini memakai fallback lokal.")
 else:
-    print("[WARN] GEMINI_API_KEY kosong. Isi file .env lalu restart app.py untuk mengaktifkan Gemini.")
+    print("  [!] GEMINI_API_KEY kosong. Isi file .env lalu restart app.py untuk mengaktifkan Gemini.")
 
 INDONESIAN_DICTIONARY = [
     "halo", "pagi", "siang", "sore", "malam", "apa", "kabar", "nama", "saya",
@@ -368,7 +490,7 @@ def local_refine_sentence(raw_text, language="auto"):
     words = raw_text.split()
     detected_lang = resolve_language(language, words)
     corrected_words = []
-    thought_steps = [f"Menganalisis masukan kata secara lokal ({detected_lang.upper()})..."]
+    thought_steps = [f"Menganalisis masukan kata ({detected_lang.upper()})..."]
 
     for word in words:
         corrected = local_autocorrect(word, detected_lang)
@@ -466,7 +588,7 @@ def gemini_predict_words(partial_word, context_words, language="auto"):
     }
 
     try:
-        model = genai.GenerativeModel("gemini-2.5-flash")
+        gemini_model = genai.GenerativeModel(GEMINI_MODEL)
         prompt = f"""
         Kamu adalah asisten prediksi kata untuk penerjemah bahasa isyarat.
         Pengguna mengetik kata huruf-per-huruf lewat deteksi isyarat tangan.
@@ -491,7 +613,7 @@ def gemini_predict_words(partial_word, context_words, language="auto"):
         }}
         """
 
-        response = model.generate_content(
+        response = gemini_model.generate_content(
             prompt,
             generation_config={"response_mime_type": "application/json"}
         )
@@ -509,10 +631,11 @@ def gemini_predict_words(partial_word, context_words, language="auto"):
                 if len(suggestions) >= 3:
                     break
 
-        return suggestions[:3], detected_lang
+        return suggestions[:3], detected_lang, "Sistem Awan"
     except Exception as e:
-        print(f"[WARN] Gagal prediksi kata Gemini: {e}")
-        return local_predict_words(partial_word, context_words, language)
+        mark_gemini_unavailable(e)
+        suggestions, detected_lang = local_predict_words(partial_word, context_words, language)
+        return suggestions, detected_lang, "Sistem Lokal"
 
 def gemini_refine_sentence(raw_text, language="auto"):
     import json
@@ -525,7 +648,7 @@ def gemini_refine_sentence(raw_text, language="auto"):
     instruction = lang_instruction.get(language, lang_instruction["auto"])
 
     try:
-        model = genai.GenerativeModel("gemini-2.5-flash")
+        gemini_model = genai.GenerativeModel(GEMINI_MODEL)
 
         prompt = f"""
         Kamu adalah Asisten Penerjemah Bahasa Isyarat.
@@ -546,7 +669,7 @@ def gemini_refine_sentence(raw_text, language="auto"):
         }}
         """
 
-        response = model.generate_content(
+        response = gemini_model.generate_content(
             prompt,
             generation_config={"response_mime_type": "application/json"}
         )
@@ -562,11 +685,21 @@ def gemini_refine_sentence(raw_text, language="auto"):
         if detected_lang not in ("id", "en"):
             detected_lang = resolve_language(language, raw_text.split())
 
-        return result.get("refined", ""), thought, detected_lang
+        return result.get("refined", ""), thought, detected_lang, "Sistem Awan"
     except Exception as e:
-        print(f"[WARN] Gagal menggunakan Gemini API: {e}")
+        mark_gemini_unavailable(e)
         refined, thought, detected_lang = local_refine_sentence(raw_text, language)
-        return refined, thought, detected_lang
+        return refined, thought, detected_lang, "Sistem Lokal"
+
+@app.route('/ai_status', methods=['GET'])
+def ai_status():
+    return jsonify({
+        "status": AI_SOURCE_STATUS,
+        "gemini_configured": bool(GEMINI_API_KEY),
+        "gemini_available": gemini_cloud_ok,
+        "model": GEMINI_MODEL if GEMINI_API_KEY else None,
+    })
+
 
 @app.route('/predict_words', methods=['POST'])
 def predict_words():
@@ -586,17 +719,21 @@ def predict_words():
                 "detected_language": resolve_language(language, context_words)
             })
 
-        if HAS_GEMINI and GEMINI_API_KEY:
-            suggestions, detected_lang = gemini_predict_words(partial_word, context_words, language)
-            source = "Sistem Awan"
+        if gemini_cloud_ok:
+            suggestions, detected_lang, source = gemini_predict_words(
+                partial_word, context_words, language
+            )
         else:
-            suggestions, detected_lang = local_predict_words(partial_word, context_words, language)
+            suggestions, detected_lang = local_predict_words(
+                partial_word, context_words, language
+            )
             source = "Sistem Lokal"
 
         return jsonify({
             "suggestions": suggestions,
             "source": source,
-            "detected_language": detected_lang
+            "detected_language": detected_lang,
+            "ai_status": AI_SOURCE_STATUS,
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -614,9 +751,8 @@ def refine_sentence():
         if not raw_text.strip():
             return jsonify({"refined": "", "thought": ["Input kosong."], "detected_language": "id"})
 
-        if HAS_GEMINI and GEMINI_API_KEY:
-            refined, thought, detected_lang = gemini_refine_sentence(raw_text, language)
-            source = "Sistem Awan"
+        if gemini_cloud_ok:
+            refined, thought, detected_lang, source = gemini_refine_sentence(raw_text, language)
         else:
             refined, thought, detected_lang = local_refine_sentence(raw_text, language)
             source = "Sistem Lokal"
@@ -625,21 +761,24 @@ def refine_sentence():
             "refined": refined,
             "thought": thought,
             "source": source,
-            "detected_language": detected_lang
+            "detected_language": detected_lang,
+            "ai_status": AI_SOURCE_STATUS,
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
-    # Pastikan folder templates dan static ada
     os.makedirs('templates', exist_ok=True)
     os.makedirs('static/css', exist_ok=True)
     os.makedirs('static/js', exist_ok=True)
-    
-    print("\n" + "="*70)
-    print("[OK] Menjalankan server lokal Pengenal Isyarat Tangan.")
-    print(f"[INFO] Status AI penyusun kalimat: {AI_SOURCE_STATUS}")
-    print("Buka browser dan buka: http://127.0.0.1:5000")
-    print("="*70 + "\n")
-    
-    app.run(host='127.0.0.1', port=5000, debug=True)
+
+    port = int(os.environ.get("PORT", "5001"))
+    seg_label = "MediaPipe" if is_mediapipe_ready() else "Warna kulit"
+    print(f"\n  BicaraIsyarat siap  ->  http://127.0.0.1:{port}")
+    print(f"  Masking tangan      : {seg_label}")
+    print(f"  AI penyusun kalimat : {AI_SOURCE_STATUS}")
+    print(f"  PID {os.getpid()}  (tekan CTRL+C untuk berhenti)\n")
+
+    # use_reloader=False agar tidak ada output/booting dobel
+    # threaded=False agar request diproses satu per satu (aman untuk model JAX)
+    app.run(host='127.0.0.1', port=port, debug=False, use_reloader=False, threaded=False)
